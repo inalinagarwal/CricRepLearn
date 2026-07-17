@@ -1,0 +1,142 @@
+"""Dual-role player embeddings with calibrated delivery-outcome heads."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+
+import torch
+from torch import nn
+
+
+@dataclass(frozen=True, slots=True)
+class ModelConfig:
+    n_batters: int
+    n_bowlers: int
+    n_venues: int
+    player_dim: int = 32
+    venue_dim: int = 16
+    context_dim: int = 4
+    numeric_dim: int = 16
+    hidden_dim: int = 256
+    dropout: float = 0.10
+    id_dropout: float = 0.05
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+class PlayerRepresentationModel(nn.Module):
+    """
+    Learns separate batting and bowling vectors from role-specific vocabularies.
+
+    There is intentionally no direct batter-bowler-pair embedding. Predictions
+    for unseen pairs must be composed from the two role representations.
+    """
+
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        self.config = config
+
+        self.batting_embedding = nn.Embedding(config.n_batters, config.player_dim)
+        self.bowling_embedding = nn.Embedding(config.n_bowlers, config.player_dim)
+        self.venue_embedding = nn.Embedding(config.n_venues, config.venue_dim)
+        self.phase_embedding = nn.Embedding(4, config.context_dim)
+        self.gender_embedding = nn.Embedding(3, config.context_dim)
+        self.team_type_embedding = nn.Embedding(3, config.context_dim)
+        self.innings_group_embedding = nn.Embedding(4, config.context_dim)
+        self.wickets_bucket_embedding = nn.Embedding(4, config.context_dim)
+        self.numeric_projection = nn.Sequential(
+            nn.Linear(7, config.numeric_dim),
+            nn.LayerNorm(config.numeric_dim),
+            nn.SiLU(),
+        )
+
+        interaction_dim = (
+            config.player_dim * 4 + config.venue_dim + config.context_dim * 5 + config.numeric_dim
+        )
+        self.trunk = nn.Sequential(
+            nn.Linear(interaction_dim, config.hidden_dim),
+            nn.LayerNorm(config.hidden_dim),
+            nn.SiLU(),
+            nn.Dropout(config.dropout),
+            nn.Linear(config.hidden_dim, config.hidden_dim // 2),
+            nn.LayerNorm(config.hidden_dim // 2),
+            nn.SiLU(),
+            nn.Dropout(config.dropout),
+        )
+        trunk_dim = config.hidden_dim // 2
+        self.runs_head = nn.Linear(trunk_dim, 8)
+        self.extras_head = nn.Linear(trunk_dim, 8)
+        self.legality_head = nn.Linear(trunk_dim, 3)
+        self.batter_dismissal_head = nn.Linear(trunk_dim, 1)
+        self.bowler_wicket_head = nn.Linear(trunk_dim, 1)
+
+        self._initialize()
+
+    def _initialize(self) -> None:
+        embeddings = (
+            self.batting_embedding,
+            self.bowling_embedding,
+            self.venue_embedding,
+            self.phase_embedding,
+            self.gender_embedding,
+            self.team_type_embedding,
+            self.innings_group_embedding,
+            self.wickets_bucket_embedding,
+        )
+        for embedding in embeddings:
+            nn.init.normal_(embedding.weight, mean=0.0, std=0.02)
+
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+    def forward(self, categorical: torch.Tensor, numeric: torch.Tensor) -> dict[str, torch.Tensor]:
+        batter = self.batting_embedding(self._apply_id_dropout(categorical[:, 0]))
+        bowler = self.bowling_embedding(self._apply_id_dropout(categorical[:, 1]))
+        venue = self.venue_embedding(categorical[:, 2])
+        phase = self.phase_embedding(categorical[:, 3])
+        gender = self.gender_embedding(categorical[:, 4])
+        team_type = self.team_type_embedding(categorical[:, 5])
+        innings_group = self.innings_group_embedding(categorical[:, 6])
+        wickets_bucket = self.wickets_bucket_embedding(categorical[:, 7])
+        numeric_context = self.numeric_projection(numeric)
+
+        interaction = torch.cat(
+            [
+                batter,
+                bowler,
+                batter * bowler,
+                torch.abs(batter - bowler),
+                venue,
+                phase,
+                gender,
+                team_type,
+                innings_group,
+                wickets_bucket,
+                numeric_context,
+            ],
+            dim=-1,
+        )
+        hidden = self.trunk(interaction)
+        return {
+            "runs_logits": self.runs_head(hidden),
+            "extras_logits": self.extras_head(hidden),
+            "legality_logits": self.legality_head(hidden),
+            "batter_dismissal_logit": self.batter_dismissal_head(hidden).squeeze(-1),
+            "bowler_wicket_logit": self.bowler_wicket_head(hidden).squeeze(-1),
+        }
+
+    def _apply_id_dropout(self, ids: torch.Tensor) -> torch.Tensor:
+        if not self.training or self.config.id_dropout <= 0:
+            return ids
+        dropped = torch.rand(ids.shape, device=ids.device) < self.config.id_dropout
+        return torch.where(dropped, torch.zeros_like(ids), ids)
+
+    def batting_embeddings(self) -> torch.Tensor:
+        return self.batting_embedding.weight.detach().cpu()
+
+    def bowling_embeddings(self) -> torch.Tensor:
+        return self.bowling_embedding.weight.detach().cpu()

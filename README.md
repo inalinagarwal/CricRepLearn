@@ -41,6 +41,7 @@ the performance and calibration thresholds that future neural models must beat.
 ```text
 src/cric_rep_learn/data/     Canonical ingestion and chronological splitting
 src/cric_rep_learn/baselines/ Rolling empirical-Bayes baselines and metrics
+src/cric_rep_learn/representations/ Dual-role neural player embeddings
 tests/                       Data correctness and leakage tests
 docs/                        Design and data documentation
 ```
@@ -115,6 +116,10 @@ identity rules, validation guarantees, and the planned weather join.
 See [`docs/statistical-baselines.md`](docs/statistical-baselines.md) for the
 delivery targets, historical update policy, smoothing hierarchy, and initial
 full-corpus results.
+
+See [`docs/representation-learning.md`](docs/representation-learning.md) for
+the dual-role embedding architecture, leakage controls, targets, checkpoint
+format, and why diffusion is deferred until after predictive validation.
 
 ## Data
 

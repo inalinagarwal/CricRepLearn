@@ -1,0 +1,30 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+.venv/
+venv/
+env/
+
+# Raw and generated data (too large for GitHub)
+data/
+processed/
+
+# Generated models and serialized preprocessing artifacts
+checkpoints/
+*.pth
+*.pt
+*.pkl
+*.npz
+
+# Local environment and editor files
+.env
+.env.*
+.idea/
+.vscode/
+
+# Notebook artifacts
+.ipynb_checkpoints/

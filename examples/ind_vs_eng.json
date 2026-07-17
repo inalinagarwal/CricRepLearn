@@ -1,0 +1,32 @@
+{
+  "team_a": {
+    "name": "India",
+    "players": [
+      {"name": "V Kohli", "bats": true},
+      {"name": "RG Sharma", "bats": true},
+      {"name": "HH Pandya", "bats": true, "bowls": true},
+      {"name": "RR Pant", "bats": true},
+      {"name": "SA Yadav", "bats": true},
+      {"name": "AR Patel", "bats": true, "bowls": true},
+      {"name": "JJ Bumrah", "bats": false, "bowls": true},
+      {"name": "Kuldeep Yadav", "bats": false, "bowls": true},
+      {"name": "YS Chahal", "bats": false, "bowls": true}
+    ]
+  },
+  "team_b": {
+    "name": "England",
+    "players": [
+      {"name": "JE Root", "bats": true, "bowls": true},
+      {"name": "BA Stokes", "bats": true, "bowls": true},
+      {"name": "JC Buttler", "bats": true},
+      {"name": "PD Salt", "bats": true},
+      {"name": "HC Brook", "bats": true},
+      {"name": "LS Livingstone", "bats": true, "bowls": true},
+      {"name": "AU Rashid", "bats": false, "bowls": true},
+      {"name": "MA Wood", "bats": false, "bowls": true},
+      {"name": "CR Woakes", "bats": false, "bowls": true}
+    ]
+  },
+  "venue": "Eden Gardens",
+  "league": "t20i"
+}

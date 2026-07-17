@@ -20,9 +20,10 @@ data foundation currently contains:
 - Source deduplication with hashes and revision metadata
 - Match-level chronological train, validation, and test assignments
 - Tests for identity, wicket attribution, legal balls, state, and leakage
+- Rolling global, contextual, player, venue, and matchup baselines
 
-Representation learning has not started yet. Statistical baselines and
-chronological evaluation will be implemented before any neural model.
+Representation learning has not started yet. The statistical baselines define
+the performance and calibration thresholds that future neural models must beat.
 
 ## Planned pipeline
 
@@ -39,6 +40,7 @@ chronological evaluation will be implemented before any neural model.
 
 ```text
 src/cric_rep_learn/data/     Canonical ingestion and chronological splitting
+src/cric_rep_learn/baselines/ Rolling empirical-Bayes baselines and metrics
 tests/                       Data correctness and leakage tests
 docs/                        Design and data documentation
 ```
@@ -85,6 +87,14 @@ cric-validate-data --dataset artifacts/canonical
 pytest
 ```
 
+Evaluate the statistical baselines:
+
+```bash
+cric-evaluate-baselines \
+  --dataset artifacts/canonical \
+  --output artifacts/baselines/metrics.json
+```
+
 ## Weather
 
 Weather can be added, but it is not part of Cricsheet. It remains a separate,
@@ -101,6 +111,10 @@ the prediction, preventing forecast leakage.
 
 See [`docs/data-foundation.md`](docs/data-foundation.md) for table definitions,
 identity rules, validation guarantees, and the planned weather join.
+
+See [`docs/statistical-baselines.md`](docs/statistical-baselines.md) for the
+delivery targets, historical update policy, smoothing hierarchy, and initial
+full-corpus results.
 
 ## Data
 

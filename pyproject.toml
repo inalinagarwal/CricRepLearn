@@ -9,6 +9,7 @@ description = "Contextual representation learning for T20 cricket players"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "duckdb>=1.1",
     "numpy>=1.26",
     "pandas>=2.2",
     "pyarrow>=15",
@@ -25,6 +26,7 @@ dev = [
 cric-build-data = "cric_rep_learn.data.build:main"
 cric-split-data = "cric_rep_learn.data.split:main"
 cric-validate-data = "cric_rep_learn.data.validate:main"
+cric-evaluate-baselines = "cric_rep_learn.baselines.evaluate:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

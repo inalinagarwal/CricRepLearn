@@ -4,18 +4,19 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+*.egg-info/
 
 .venv/
 venv/
 env/
 
 # Raw and generated data (too large for GitHub)
-data/
-processed/
-artifacts/
+/data/
+/processed/
+/artifacts/
 
 # Generated models and serialized preprocessing artifacts
-checkpoints/
+/checkpoints/
 *.pth
 *.pt
 *.pkl

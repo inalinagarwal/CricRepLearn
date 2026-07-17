@@ -1,3 +1,18 @@
+Metadata-Version: 2.4
+Name: cric-rep-learn
+Version: 0.1.0
+Summary: Contextual representation learning for T20 cricket players
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.26
+Requires-Dist: pandas>=2.2
+Requires-Dist: pyarrow>=15
+Requires-Dist: scikit-learn>=1.4
+Requires-Dist: torch>=2.2
+Provides-Extra: dev
+Requires-Dist: pytest>=8; extra == "dev"
+Requires-Dist: ruff>=0.5; extra == "dev"
+
 # CricRepLearn
 
 CricRepLearn is an experimental system for learning contextual T20 cricket
@@ -21,8 +36,9 @@ data foundation currently contains:
 - Match-level chronological train, validation, and test assignments
 - Tests for identity, wicket attribution, legal balls, state, and leakage
 
-Representation learning has not started yet. Statistical baselines and
-chronological evaluation will be implemented before any neural model.
+The current model and example rankings have not yet been validated against
+strong statistical baselines or a chronological test set. They should not be
+treated as reliable forecasts.
 
 ## Planned pipeline
 
@@ -40,7 +56,8 @@ chronological evaluation will be implemented before any neural model.
 ```text
 src/cric_rep_learn/data/     Canonical ingestion and chronological splitting
 tests/                       Data correctness and leakage tests
-docs/                        Design and data documentation
+examples/                    Small example fixture definitions
+*.py at repository root      Previous prototype, retained during the rebuild
 ```
 
 Raw data, generated datasets, and model artifacts are intentionally excluded
@@ -78,10 +95,9 @@ cric-split-data \
   --output artifacts/canonical/split_manifest.parquet
 ```
 
-Validate the complete serialized dataset and run the automated tests:
+Run the validation tests:
 
 ```bash
-cric-validate-data --dataset artifacts/canonical
 pytest
 ```
 
@@ -98,9 +114,6 @@ provenance-tracked table keyed by match ID. A reliable historical join requires:
 The canonical schemas reserve explicit venue-location and match-weather tables.
 Weather will only be used when its timestamp would have been available before
 the prediction, preventing forecast leakage.
-
-See [`docs/data-foundation.md`](docs/data-foundation.md) for table definitions,
-identity rules, validation guarantees, and the planned weather join.
 
 ## Data
 

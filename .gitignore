@@ -12,6 +12,7 @@ env/
 # Raw and generated data (too large for GitHub)
 data/
 processed/
+artifacts/
 
 # Generated models and serialized preprocessing artifacts
 checkpoints/

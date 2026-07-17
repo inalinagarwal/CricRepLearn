@@ -1,0 +1,3 @@
+[console_scripts]
+cric-build-data = cric_rep_learn.data.build:main
+cric-split-data = cric_rep_learn.data.split:main

@@ -122,6 +122,9 @@ See [`docs/representation-learning.md`](docs/representation-learning.md) for
 the dual-role embedding architecture, leakage controls, targets, checkpoint
 format, and why diffusion is deferred until after predictive validation.
 
+See [`docs/expected-contribution.md`](docs/expected-contribution.md) for the
+player-centric fixed-opportunity batting objective and embedding success gate.
+
 See [`docs/player-centric.md`](docs/player-centric.md) for hierarchical
 matchup lookup (Rohit → vs Starc → Aus left-arm pace → left-arm pace).
 

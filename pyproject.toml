@@ -34,6 +34,9 @@ cric-export-embeddings = "cric_rep_learn.representations.export:main"
 cric-evaluate-representations = "cric_rep_learn.representations.evaluate:main"
 cric-build-player-attributes = "cric_rep_learn.data.player_attributes:main"
 cric-player-card = "cric_rep_learn.players.card:main"
+cric-build-contribution-data = "cric_rep_learn.contribution.data:main"
+cric-train-contribution = "cric_rep_learn.contribution.train:main"
+cric-evaluate-contribution = "cric_rep_learn.contribution.evaluate:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -73,7 +73,7 @@ cric-evaluate-contribution \
   --output artifacts/analysis/contribution-ablations.json
 ```
 
-## First MPS result
+## First MPS result (absolute runs)
 
 | Model | Val MAE (`balls >= 3`) |
 | --- | ---: |
@@ -82,9 +82,51 @@ cric-evaluate-contribution \
 | Embedding gap | **-0.16** (fails ≥ 0.5 gate) |
 
 Both beat a global strike-rate × balls baseline (~6.74 MAE), so the network
-learns opportunity/context structure — but **not** via batter identity. Next
-iteration should predict a **residual over an opportunity baseline** (context
-SR × balls) so embeddings cannot hide inside the mean rate.
+learns opportunity/context structure — but **not** via batter identity.
+
+## Residual redesign
+
+The follow-up objective is:
+
+```text
+predicted runs = context_SR(gender, team_type, innings, phase, wickets) × balls
+               + neural residual(batter, venue, entry state, …)
+```
+
+Context strike rates are fit on **train only**. Residual heads start at zero so
+the network must improve on the opportunity baseline. Same ≥ 0.5 MAE embedding
+gate applies.
+
+```bash
+cric-build-contribution-data \
+  --output artifacts/contribution-data-residual \
+  --overwrite
+
+cric-train-contribution \
+  --data artifacts/contribution-data-residual \
+  --output artifacts/checkpoints/contribution-residual-full \
+  --device mps
+
+cric-train-contribution \
+  --data artifacts/contribution-data-residual \
+  --output artifacts/checkpoints/contribution-residual-no-players \
+  --ablation no_players \
+  --device mps
+```
+
+### Residual MPS result
+
+| Model | Val MAE (`balls >= 3`) |
+| --- | ---: |
+| Context SR × balls | 5.984 |
+| Residual + players | 5.260 |
+| Residual, no players | **5.242** |
+| Embedding gap | **-0.018** (fails ≥ 0.5 gate) |
+
+Residual learning helps vs the context opportunity baseline (~−0.72 MAE), but
+batter IDs still do not. Stop further residual tweaks on this label; next work
+should change the representation target (e.g. player-level ranking / pairwise
+preference, or bowling-conditioned contribution) rather than the prior.
 
 ## Next after a pass
 

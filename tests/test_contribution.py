@@ -28,14 +28,28 @@ def test_contribution_model_shapes_and_gradients() -> None:
     )
     categorical = torch.tensor([[1, 1, 1, 1, 1, 1, 1], [2, 2, 2, 1, 1, 2, 1]])
     numeric = torch.zeros((2, len(NUMERIC_COLUMNS)))
-    outputs = model(categorical, numeric)
+    baseline = torch.tensor([12.0, 8.0])
+    outputs = model(categorical, numeric, baseline)
     assert outputs["runs_pred"].shape == (2,)
+    assert torch.allclose(outputs["runs_pred"], baseline)  # zero residual at init
     assert outputs["dismissal_logit"].shape == (2,)
     targets = torch.tensor([[10.0, 1.0], [3.0, 0.0]])
     loss = contribution_loss(outputs, targets, TrainingConfig())
     loss.backward()
     assert model.batting_embedding.weight.grad is not None
     assert model.batting_embedding.weight.grad[1].abs().sum() > 0
+
+
+def test_zero_residual_reproduces_baseline() -> None:
+    model = BatterContributionModel(ModelConfig(n_batters=2, n_venues=2, id_dropout=0.0))
+    baseline = torch.tensor([15.5])
+    outputs = model(
+        torch.zeros((1, len(CATEGORICAL_COLUMNS)), dtype=torch.long),
+        torch.zeros((1, len(NUMERIC_COLUMNS))),
+        baseline,
+    )
+    assert torch.allclose(outputs["runs_pred"], baseline)
+    assert torch.allclose(outputs["runs_residual"], torch.zeros(1))
 
 
 def test_build_contribution_dataset_train_only_vocab(tmp_path) -> None:
@@ -168,11 +182,14 @@ def test_build_contribution_dataset_train_only_vocab(tmp_path) -> None:
     assert "batter-val" not in batter_ids
 
     val = EncodedStintDataset(output / "validation.parquet")
-    categorical, numeric, targets, balls, eligible = val[0]
+    categorical, numeric, baseline, targets, balls, eligible = val[0]
     assert categorical.shape == (len(CATEGORICAL_COLUMNS),)
     assert numeric.shape == (len(NUMERIC_COLUMNS),)
+    assert baseline.ndim == 0 or baseline.shape == ()
+    assert float(baseline.item()) > 0
     assert targets[0].item() == 4.0
     assert balls.item() == 1.0
     assert eligible.item() is True
     # Validation batter must map to UNK index 0
     assert int(categorical[0].item()) == 0
+    assert "baseline_runs_mae_min3" in manifest

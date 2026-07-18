@@ -89,6 +89,8 @@ class ContributionMetrics:
         self.loss_sum = 0.0
         self.mae_sum = 0.0
         self.eval_mae_sum = 0.0
+        self.baseline_mae_sum = 0.0
+        self.eval_baseline_mae_sum = 0.0
         self.rmse_sum = 0.0
         self.dismissal_brier_sum = 0.0
         self.runs_sum = 0.0
@@ -101,6 +103,7 @@ class ContributionMetrics:
         targets: torch.Tensor,
         loss: torch.Tensor,
         eval_eligible: torch.Tensor,
+        baseline_runs: torch.Tensor,
     ) -> None:
         batch = targets.shape[0]
         self.n += batch
@@ -108,7 +111,9 @@ class ContributionMetrics:
         runs = targets[:, 0]
         pred = outputs["runs_pred"]
         abs_err = torch.abs(pred - runs)
+        baseline_err = torch.abs(baseline_runs - runs)
         self.mae_sum += float(abs_err.sum())
+        self.baseline_mae_sum += float(baseline_err.sum())
         self.rmse_sum += float(torch.square(pred - runs).sum())
         self.runs_sum += float(runs.sum())
         self.pred_sum += float(pred.sum())
@@ -119,6 +124,7 @@ class ContributionMetrics:
         if eval_eligible.any():
             self.eval_n += int(eval_eligible.sum())
             self.eval_mae_sum += float(abs_err[eval_eligible].sum())
+            self.eval_baseline_mae_sum += float(baseline_err[eval_eligible].sum())
 
     def as_dict(self) -> dict[str, float | int]:
         if not self.n:
@@ -127,6 +133,7 @@ class ContributionMetrics:
             "n": self.n,
             "loss": self.loss_sum / self.n,
             "runs_mae": self.mae_sum / self.n,
+            "baseline_runs_mae": self.baseline_mae_sum / self.n,
             "runs_rmse": (self.rmse_sum / self.n) ** 0.5,
             "dismissal_brier": self.dismissal_brier_sum / self.n,
             "mean_runs": self.runs_sum / self.n,
@@ -135,6 +142,7 @@ class ContributionMetrics:
         if self.eval_n:
             result["eval_n"] = self.eval_n
             result["runs_mae_min3"] = self.eval_mae_sum / self.eval_n
+            result["baseline_runs_mae_min3"] = self.eval_baseline_mae_sum / self.eval_n
         return result
 
 
@@ -152,20 +160,20 @@ def run_epoch(
     metrics = ContributionMetrics()
     total_batches = len(loader)
     report_every = max(1, total_batches // 10)
-    for batch_index, (categorical, numeric, targets, _balls, eval_eligible) in enumerate(
-        loader, start=1
-    ):
+    for batch_index, batch in enumerate(loader, start=1):
+        categorical, numeric, baseline, targets, _balls, eval_eligible = batch
         categorical = _apply_ablation(categorical.to(device), config.ablation)
         numeric = numeric.to(device)
+        baseline = baseline.to(device)
         targets = targets.to(device)
         eval_eligible = eval_eligible.to(device)
-        outputs = model(categorical, numeric)
+        outputs = model(categorical, numeric, baseline)
         loss = contribution_loss(outputs, targets, config)
         if training:
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
-        metrics.update(outputs, targets, loss.detach(), eval_eligible)
+        metrics.update(outputs, targets, loss.detach(), eval_eligible, baseline)
         if batch_index == total_batches or batch_index % report_every == 0:
             print(
                 f"\r{label}: {100.0 * batch_index / total_batches:6.2f}% "

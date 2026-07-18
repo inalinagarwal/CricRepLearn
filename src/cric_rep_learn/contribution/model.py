@@ -1,4 +1,4 @@
-"""Batter embeddings trained from fixed-opportunity contribution."""
+"""Batter embeddings trained from residual contribution over context rates."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ class ModelConfig:
     id_dropout: float = 0.05
     venue_dropout: float = 0.05
     numeric_features: int = 3
+    use_baseline_residual: bool = True
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -28,10 +29,11 @@ class ModelConfig:
 
 class BatterContributionModel(nn.Module):
     """
-    Predicts stint runs and dismissal probability given balls faced.
+    Predicts stint runs as context baseline + neural residual.
 
-    Opportunity (balls_faced) is an input. Player identity must improve the
-    mapping from opportunity + entry context to contribution.
+    ``baseline_runs`` is train-only context strike rate × balls faced. The
+    residual head starts near zero so early predictions match the opportunity
+    baseline; batter identity must improve on that.
     """
 
     def __init__(self, config: ModelConfig):
@@ -86,6 +88,9 @@ class BatterContributionModel(nn.Module):
                 nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
+        if self.config.use_baseline_residual:
+            nn.init.zeros_(self.runs_head.weight)
+            nn.init.zeros_(self.runs_head.bias)
 
     def _dropout_ids(self, indices: torch.Tensor, rate: float) -> torch.Tensor:
         if not self.training or rate <= 0:
@@ -97,7 +102,10 @@ class BatterContributionModel(nn.Module):
         return dropped
 
     def forward(
-        self, categorical: torch.Tensor, numeric: torch.Tensor
+        self,
+        categorical: torch.Tensor,
+        numeric: torch.Tensor,
+        baseline_runs: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         batter = self._dropout_ids(categorical[:, 0], self.config.id_dropout)
         venue = self._dropout_ids(categorical[:, 1], self.config.venue_dropout)
@@ -115,8 +123,16 @@ class BatterContributionModel(nn.Module):
             dim=-1,
         )
         hidden = self.trunk(features)
+        residual = self.runs_head(hidden).squeeze(-1)
+        if self.config.use_baseline_residual:
+            if baseline_runs is None:
+                raise ValueError("baseline_runs required when use_baseline_residual=True")
+            runs_pred = baseline_runs + residual
+        else:
+            runs_pred = residual
         return {
-            "runs_pred": self.runs_head(hidden).squeeze(-1),
+            "runs_pred": runs_pred,
+            "runs_residual": residual,
             "dismissal_logit": self.dismissal_head(hidden).squeeze(-1),
         }
 

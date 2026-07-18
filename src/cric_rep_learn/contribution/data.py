@@ -33,6 +33,10 @@ NUMERIC_COLUMNS = [
     "balls_faced_log1p",
 ]
 
+BASELINE_COLUMNS = [
+    "baseline_runs",
+]
+
 TARGET_COLUMNS = [
     "runs",
     "dismissed",
@@ -232,25 +236,73 @@ def build_contribution_dataset(
                 AVG(entry_score_before)::DOUBLE AS score_mean,
                 STDDEV_SAMP(entry_score_before)::DOUBLE AS score_std,
                 AVG(entry_wickets_before)::DOUBLE AS wickets_mean,
-                STDDEV_SAMP(entry_wickets_before)::DOUBLE AS wickets_std
+                STDDEV_SAMP(entry_wickets_before)::DOUBLE AS wickets_std,
+                SUM(runs)::DOUBLE / NULLIF(SUM(balls_faced), 0) AS global_strike_rate
             FROM stints
             WHERE split = 'train'
             """
         ).fetchone()
-        score_mean, score_std, wickets_mean, wickets_std = train_stats
+        score_mean, score_std, wickets_mean, wickets_std, global_sr = train_stats
         score_std = score_std or 1.0
         wickets_std = wickets_std or 1.0
+        global_sr = float(global_sr or 1.0)
+
+        context_rates = connection.execute(
+            """
+            SELECT
+                gender,
+                team_type,
+                innings_group,
+                entry_phase,
+                wickets_bucket,
+                SUM(runs)::DOUBLE / NULLIF(SUM(balls_faced), 0) AS strike_rate,
+                SUM(balls_faced)::BIGINT AS balls_faced
+            FROM stints
+            WHERE split = 'train'
+            GROUP BY 1, 2, 3, 4, 5
+            """
+        ).fetchdf()
+        context_sr: dict[tuple[Any, ...], float] = {}
+        for row in context_rates.to_dict(orient="records"):
+            if row["strike_rate"] is None:
+                continue
+            key = (
+                str(row["gender"]),
+                str(row["team_type"]),
+                str(row["innings_group"]),
+                str(row["entry_phase"]),
+                str(row["wickets_bucket"]),
+            )
+            context_sr[key] = float(row["strike_rate"])
 
         stints = connection.execute("SELECT * FROM stints ORDER BY match_date, match_id, innings").fetchdf()
     finally:
         connection.close()
 
     split_counts: dict[str, int] = {}
+    baseline_mae_sums: dict[str, float] = {}
+    baseline_mae_ns: dict[str, int] = {}
     for split_name in ("train", "validation", "test"):
         split_frame = stints[stints["split"] == split_name].copy()
         rows: list[dict[str, Any]] = []
+        abs_err_sum = 0.0
+        abs_err_n = 0
         for record in split_frame.to_dict(orient="records"):
             balls = int(record["balls_faced"])
+            key = (
+                str(record["gender"]),
+                str(record["team_type"]),
+                str(record["innings_group"]),
+                str(record["entry_phase"]),
+                str(record["wickets_bucket"]),
+            )
+            strike_rate = context_sr.get(key, global_sr)
+            baseline_runs = float(strike_rate * balls)
+            runs = int(record["runs"])
+            eligible = balls >= min_balls_eval
+            if eligible:
+                abs_err_sum += abs(baseline_runs - runs)
+                abs_err_n += 1
             rows.append(
                 {
                     "match_id": record["match_id"],
@@ -276,14 +328,17 @@ def build_contribution_dataset(
                     ),
                     "balls_faced": balls,
                     "balls_faced_log1p": float(np.log1p(balls)),
-                    "runs": int(record["runs"]),
+                    "baseline_runs": baseline_runs,
+                    "runs": runs,
                     "dismissed": float(record["dismissed"]),
-                    "eval_eligible": balls >= min_balls_eval,
+                    "eval_eligible": eligible,
                 }
             )
         table = pa.Table.from_pylist(rows)
         pq.write_table(table, output_dir / f"{split_name}.parquet", compression="zstd")
         split_counts[split_name] = len(rows)
+        baseline_mae_sums[split_name] = abs_err_sum
+        baseline_mae_ns[split_name] = abs_err_n
 
     vocab = {
         "batters": batter_vocab,
@@ -293,6 +348,10 @@ def build_contribution_dataset(
             "score_std": float(score_std),
             "wickets_mean": float(wickets_mean),
             "wickets_std": float(wickets_std),
+            "global_strike_rate": global_sr,
+        },
+        "context_strike_rates": {
+            "|".join(key): value for key, value in sorted(context_sr.items())
         },
         "min_balls_eval": min_balls_eval,
     }
@@ -301,12 +360,28 @@ def build_contribution_dataset(
     manifest = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "canonical_dir": str(canonical_dir),
-        "objective": "expected_batting_contribution_given_balls_faced",
+        "objective": "residual_batting_contribution_over_context_sr",
         "grain": "match_id,innings,batter_id",
+        "baseline": "train-only context strike rate × balls_faced",
+        "context_keys": [
+            "gender",
+            "team_type",
+            "innings_group",
+            "entry_phase",
+            "wickets_bucket",
+        ],
         "excludes_super_overs": True,
         "ball_faced_definition": "is_legal OR extras_noballs > 0",
         "min_balls_eval": min_balls_eval,
         "split_counts": split_counts,
+        "baseline_runs_mae_min3": {
+            split: (
+                baseline_mae_sums[split] / baseline_mae_ns[split]
+                if baseline_mae_ns[split]
+                else None
+            )
+            for split in ("train", "validation", "test")
+        },
         "n_batters": len(batter_vocab) - 1,
         "n_venues": len(venue_vocab) - 1,
         "canonical_hashes": {
@@ -333,6 +408,10 @@ class EncodedStintDataset(Dataset):
         self.numeric = torch.tensor(
             frame[NUMERIC_COLUMNS].to_numpy(dtype=np.float32), dtype=torch.float32
         )
+        self.baseline = torch.tensor(
+            frame[BASELINE_COLUMNS].to_numpy(dtype=np.float32).reshape(-1),
+            dtype=torch.float32,
+        )
         self.targets = torch.tensor(
             frame[TARGET_COLUMNS].to_numpy(dtype=np.float32), dtype=torch.float32
         )
@@ -350,6 +429,7 @@ class EncodedStintDataset(Dataset):
         return (
             self.categorical[index],
             self.numeric[index],
+            self.baseline[index],
             self.targets[index],
             self.balls_faced[index],
             self.eval_eligible[index],

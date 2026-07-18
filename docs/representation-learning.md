@@ -21,8 +21,9 @@ batter cannot accidentally receive an untrained bowling vector. Exported rows
 include role-specific delivery and match counts plus first and last train dates.
 
 Index zero is a learned role-specific unknown vector. During training, five
-percent of known player IDs are independently replaced by it, teaching a useful
-cold-start fallback without leaking validation or test identities.
+percent of known player IDs are independently replaced by it. Known venues use
+the same five-percent dropout policy to train `UNK_VENUE`. This teaches useful
+cold-start fallbacks without leaking validation or test identities.
 
 ## Encoded model data
 
@@ -48,6 +49,15 @@ Numeric pre-delivery inputs:
 - target runs remaining
 - required run rate
 - whether a target exists
+- `log1p` prior batter, bowler, venue, and direct-matchup delivery evidence
+
+The dataset builder also runs the historical empirical-Bayes model in strict
+date order. Residual priors are configurable with `--baseline-level`. The
+current embedding-stress experiment uses **context**-level probabilities
+(gender, team type, innings group, phase, wicket pressure) so player identity
+cannot hide inside the prior. Matchup-level residuals remain available for
+delivery-forecast comparisons. All matches on one date are predicted before
+that date is added to history.
 
 Targets match the statistical baseline:
 
@@ -78,13 +88,23 @@ between styles without storing a direct pair embedding. An unseen
 batter-bowler pair can therefore still be predicted from both players' broader
 histories.
 
-The shared interaction trunk feeds five heads:
+The shared interaction trunk feeds five residual heads:
 
-- categorical batter-runs logits
-- categorical extras logits
-- categorical legality logits
-- batter-dismissal logit
-- bowler-wicket logit
+- categorical batter-runs residual logits
+- categorical extras residual logits
+- categorical legality residual logits
+- batter-dismissal residual logit
+- bowler-wicket residual logit
+
+Each final prediction is:
+
+```text
+final logits = log empirical-Bayes probability + neural residual
+```
+
+Residual heads start near zero, so the initial network reproduces the
+calibrated historical forecast. The embeddings must learn incremental signal
+instead of relearning global outcome frequencies.
 
 All heads are trained jointly with ordinary cross-entropy or binary
 cross-entropy. Class weighting is intentionally avoided in the first model
@@ -94,19 +114,28 @@ calibration are evaluated explicitly.
 ## Evaluation policy
 
 The first model is trained only on the training split and selected only on
-validation metrics. Frozen neural results and rolling historical-baseline
-results are labelled separately until matched frozen and operational
-prequential protocols are implemented. Metrics include:
+validation metrics. The current matched protocol is operational prequential:
+neural parameters remain frozen during validation while empirical-Bayes
+features update after each complete date under the same policy used by the
+baseline evaluator. Metrics include:
 
 - runs log loss and Brier score
 - expected-runs error
 - dismissal and wicket log loss/Brier score
 - legality and extras log loss
 
-The strongest current validation runs baseline is approximately `1.24241` log
-loss. A neural model is not considered useful merely because its embeddings
-look plausible; it must improve held-out probability forecasts without harming
-calibration.
+The residual model can consume any hierarchy level from the empirical-Bayes
+baselines. The matchup residual improved validation runs log loss from about
+`1.24255` to `1.23048`, but a no-player retrain matched that gain. The
+context-only residual redesign then improved from context EB `1.25074` to
+`1.23266` with players, versus `1.23417` without players—an embedding gap of
+only `~0.0015`, below the `0.005` bar. Embeddings therefore still do not earn
+their keep under delivery multiclass residual learning. See
+[`validation-analysis.md`](validation-analysis.md).
+
+A neural model is not considered useful merely because its embeddings look
+plausible; it must improve held-out probability forecasts without harming
+calibration, and player IDs must be necessary for that improvement.
 
 After architecture selection, a final historical model can be retrained using
 all matches available before a real fixture. New players remain unknown until
@@ -143,14 +172,16 @@ predictive value.
 ```bash
 cric-build-model-data \
   --canonical artifacts/canonical \
-  --output artifacts/model-data
+  --output artifacts/model-data-context-residual \
+  --baseline-level context
 
-cric-train-representations \
-  --model-data artifacts/model-data \
-  --output artifacts/checkpoints/representations \
-  --baseline-metrics artifacts/baselines/metrics.json
+cric-train-nxt \
+  --model-data artifacts/model-data-context-residual \
+  --output artifacts/checkpoints/context-residual-full \
+  --baseline-metrics artifacts/baselines/metrics.json \
+  --device mps
 
 cric-export-embeddings \
-  --checkpoint artifacts/checkpoints/representations/best.pt \
+  --checkpoint artifacts/checkpoints/context-residual-full/best.pt \
   --output artifacts/embeddings
 ```

@@ -22,8 +22,9 @@ data foundation currently contains:
 - Tests for identity, wicket attribution, legal balls, state, and leakage
 - Rolling global, contextual, player, venue, and matchup baselines
 
-Representation learning has not started yet. The statistical baselines define
-the performance and calibration thresholds that future neural models must beat.
+Representation learning is now implemented as a dual-role residual multitask
+network. Full validation training and architecture ablations are the current
+research stage; opportunity modelling and Dream11 optimization come next.
 
 ## Planned pipeline
 
@@ -120,6 +121,13 @@ full-corpus results.
 See [`docs/representation-learning.md`](docs/representation-learning.md) for
 the dual-role embedding architecture, leakage controls, targets, checkpoint
 format, and why diffusion is deferred until after predictive validation.
+
+See [`docs/project-guide.md`](docs/project-guide.md) for the complete product
+direction, code map, training guide, current limitations, and decisions that
+still need review.
+
+See [`docs/validation-analysis.md`](docs/validation-analysis.md) for the first
+validation calibration, subgroup, and ablation results on the residual model.
 
 ## Data
 

@@ -17,6 +17,14 @@ import pyarrow.parquet as pq
 import torch
 from torch.utils.data import Dataset
 
+from cric_rep_learn.baselines.historical import BASELINE_LEVELS
+
+from .baseline_features import (
+    BASELINE_PROBABILITY_COLUMNS,
+    EVIDENCE_COLUMNS,
+    generate_baseline_features,
+)
+
 CATEGORICAL_COLUMNS = [
     "batter_idx",
     "bowler_idx",
@@ -36,6 +44,7 @@ NUMERIC_COLUMNS = [
     "target_runs_remaining_z",
     "required_run_rate_z",
     "has_target",
+    *EVIDENCE_COLUMNS,
 ]
 
 CATEGORICAL_TARGET_COLUMNS = [
@@ -84,7 +93,12 @@ def build_model_dataset(
     output_dir: Path,
     *,
     overwrite: bool = False,
+    baseline_level: str = "context",
 ) -> dict[str, Any]:
+    if baseline_level not in BASELINE_LEVELS:
+        raise ValueError(
+            f"Unknown baseline level {baseline_level!r}; expected one of {BASELINE_LEVELS}"
+        )
     canonical_dir = canonical_dir.resolve()
     output_dir = output_dir.resolve()
     if output_dir.exists():
@@ -97,6 +111,13 @@ def build_model_dataset(
     matches = _escape_sql_path(canonical_dir / "matches.parquet")
     aliases = _escape_sql_path(canonical_dir / "player_aliases.parquet")
     split_manifest = _escape_sql_path(canonical_dir / "split_manifest.parquet")
+    baseline_features_path = output_dir / "baseline_features.parquet"
+    baseline_feature_metadata = generate_baseline_features(
+        canonical_dir,
+        baseline_features_path,
+        level=baseline_level,
+    )
+    baseline_features = _escape_sql_path(baseline_features_path)
 
     connection = duckdb.connect()
     try:
@@ -210,6 +231,7 @@ def build_model_dataset(
                 m.team_type,
                 m.venue,
                 s.split,
+                {", ".join(f"bf.{column}" for column in BASELINE_PROBABILITY_COLUMNS + EVIDENCE_COLUMNS)},
                 CASE
                     WHEN d.is_super_over THEN 'super_over'
                     WHEN d.innings = 1 THEN 'first_innings'
@@ -256,6 +278,8 @@ def build_model_dataset(
             FROM read_parquet('{deliveries}') d
             JOIN read_parquet('{matches}') m USING (match_id)
             JOIN read_parquet('{split_manifest}') s USING (match_id)
+            JOIN read_parquet('{baseline_features}') bf
+                USING (match_id, innings, attempt_index_in_innings)
             """
         )
 
@@ -282,7 +306,7 @@ def build_model_dataset(
             numeric_stats[column] = {"mean": mean, "std": std if std > 1e-8 else 1.0}
 
         normalized_sql = []
-        output_names = NUMERIC_COLUMNS[:-1]
+        output_names = NUMERIC_COLUMNS[:6]
         for column, output_name in zip(raw_numeric_columns, output_names, strict=True):
             stats = numeric_stats[column]
             normalized_sql.append(
@@ -319,6 +343,8 @@ def build_model_dataset(
                     CASE r.wickets_bucket {wickets_cases} ELSE 0 END::TINYINT AS wickets_bucket_idx,
                     {", ".join(normalized_sql)},
                     CAST(r.f_has_target AS FLOAT) AS has_target,
+                    {", ".join(f"CAST(r.{column} AS FLOAT) AS {column}" for column in EVIDENCE_COLUMNS)},
+                    {", ".join(f"CAST(r.{column} AS FLOAT) AS {column}" for column in BASELINE_PROBABILITY_COLUMNS)},
                     LEAST(r.runs_batter, 7)::TINYINT AS runs_target,
                     LEAST(r.runs_extras, 7)::TINYINT AS extras_target,
                     CASE
@@ -374,6 +400,10 @@ def build_model_dataset(
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "vocab_policy": "train-only role-specific vocabularies with learned unknown index 0",
             "numeric_stats_policy": "training_split_only",
+            "baseline_features": {
+                **baseline_feature_metadata,
+                "sha256": _sha256(baseline_features_path),
+            },
             "canonical_metadata_sha256": _sha256(canonical_dir / "metadata.json"),
             "split_manifest_sha256": _sha256(canonical_dir / "split_manifest.parquet"),
             "batters": len(batters),
@@ -384,6 +414,7 @@ def build_model_dataset(
             "numeric_stats": numeric_stats,
             "categorical_columns": CATEGORICAL_COLUMNS,
             "numeric_columns": NUMERIC_COLUMNS,
+            "baseline_probability_columns": BASELINE_PROBABILITY_COLUMNS,
             "categorical_target_columns": CATEGORICAL_TARGET_COLUMNS,
             "binary_target_columns": BINARY_TARGET_COLUMNS,
         }
@@ -402,6 +433,7 @@ class EncodedDeliveryDataset(Dataset):
         columns = (
             CATEGORICAL_COLUMNS
             + NUMERIC_COLUMNS
+            + BASELINE_PROBABILITY_COLUMNS
             + CATEGORICAL_TARGET_COLUMNS
             + BINARY_TARGET_COLUMNS
         )
@@ -414,6 +446,14 @@ class EncodedDeliveryDataset(Dataset):
         self.numeric = torch.from_numpy(
             np.column_stack(
                 [table[column].to_numpy(zero_copy_only=False) for column in NUMERIC_COLUMNS]
+            ).astype(np.float32, copy=False)
+        )
+        self.baseline_probabilities = torch.from_numpy(
+            np.column_stack(
+                [
+                    table[column].to_numpy(zero_copy_only=False)
+                    for column in BASELINE_PROBABILITY_COLUMNS
+                ]
             ).astype(np.float32, copy=False)
         )
         self.categorical_targets = torch.from_numpy(
@@ -437,6 +477,7 @@ class EncodedDeliveryDataset(Dataset):
         return (
             self.categorical[index],
             self.numeric[index],
+            self.baseline_probabilities[index],
             self.categorical_targets[index],
             self.binary_targets[index],
         )
@@ -446,9 +487,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--canonical", type=Path, default=Path("artifacts/canonical"))
     parser.add_argument("--output", type=Path, default=Path("artifacts/model-data"))
+    parser.add_argument(
+        "--baseline-level",
+        choices=BASELINE_LEVELS,
+        default="context",
+        help="Empirical-Bayes hierarchy level used as the residual prior",
+    )
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
-    manifest = build_model_dataset(args.canonical, args.output, overwrite=args.overwrite)
+    manifest = build_model_dataset(
+        args.canonical,
+        args.output,
+        overwrite=args.overwrite,
+        baseline_level=args.baseline_level,
+    )
     print(json.dumps(manifest, indent=2))
 
 

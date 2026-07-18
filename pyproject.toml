@@ -31,6 +31,7 @@ cric-evaluate-baselines = "cric_rep_learn.baselines.evaluate:main"
 cric-build-model-data = "cric_rep_learn.representations.data:main"
 cric-train-representations = "cric_rep_learn.representations.train:main"
 cric-export-embeddings = "cric_rep_learn.representations.export:main"
+cric-evaluate-representations = "cric_rep_learn.representations.evaluate:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

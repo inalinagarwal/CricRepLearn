@@ -34,6 +34,25 @@ class TrainingConfig:
     batter_dismissal_weight: float = 1.0
     bowler_wicket_weight: float = 1.0
     embedding_weight_decay: float = 1e-3
+    ablation: str = "none"
+    use_baseline_residual: bool = True
+
+
+def _apply_training_ablation(
+    categorical: torch.Tensor, ablation: str
+) -> torch.Tensor:
+    if ablation == "none":
+        return categorical
+    categorical = categorical.clone()
+    if ablation in {"no_batter", "no_players"}:
+        categorical[:, 0] = 0
+    if ablation in {"no_bowler", "no_players"}:
+        categorical[:, 1] = 0
+    if ablation == "no_venue":
+        categorical[:, 2] = 0
+    if ablation not in {"none", "no_batter", "no_bowler", "no_players", "no_venue"}:
+        raise ValueError(f"Unknown ablation {ablation!r}")
+    return categorical
 
 
 class NeuralMetrics:
@@ -123,7 +142,14 @@ class NeuralMetrics:
         }
 
 
-def choose_device() -> torch.device:
+def choose_device(requested: str = "auto") -> torch.device:
+    if requested != "auto":
+        device = torch.device(requested)
+        if requested == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError("CUDA was requested but is unavailable")
+        if requested == "mps" and not torch.backends.mps.is_available():
+            raise RuntimeError("MPS was requested but is unavailable")
+        return device
     if torch.cuda.is_available():
         return torch.device("cuda")
     if torch.backends.mps.is_available():
@@ -173,22 +199,28 @@ def run_epoch(
     *,
     optimizer: torch.optim.Optimizer | None,
     max_batches: int | None = None,
+    label: str = "epoch",
 ) -> dict[str, float | int]:
     training = optimizer is not None
     model.train(training)
     metrics = NeuralMetrics()
+    total_batches = len(loader)
+    if max_batches is not None:
+        total_batches = min(total_batches, max_batches)
+    report_every = max(1, math.ceil(total_batches / 20))
 
     for batch_index, batch in enumerate(loader):
         if max_batches is not None and batch_index >= max_batches:
             break
-        categorical, numeric, categorical_targets, binary_targets = (
+        categorical, numeric, baseline, categorical_targets, binary_targets = (
             tensor.to(device, non_blocking=True) for tensor in batch
         )
+        categorical = _apply_training_ablation(categorical, config.ablation)
         if training:
             optimizer.zero_grad(set_to_none=True)
 
         with torch.set_grad_enabled(training):
-            outputs = model(categorical, numeric)
+            outputs = model(categorical, numeric, baseline)
             loss = multitask_loss(outputs, categorical_targets, binary_targets, config)
             if training:
                 loss.backward()
@@ -196,16 +228,25 @@ def run_epoch(
                 optimizer.step()
 
         metrics.update(outputs, categorical_targets, binary_targets, loss.detach())
+        completed = batch_index + 1
+        if completed % report_every == 0 or completed == total_batches:
+            percentage = 100.0 * completed / total_batches
+            print(
+                f"\r{label}: {percentage:6.2f}% ({completed:,}/{total_batches:,} batches)",
+                end="\n" if completed == total_batches else "",
+                flush=True,
+            )
 
     return metrics.as_dict()
 
 
-def _baseline_validation_runs_log_loss(path: Path | None) -> float | None:
+def _baseline_validation_runs_log_loss(
+    path: Path | None, *, level: str = "context"
+) -> float | None:
     if path is None or not path.exists():
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
-    levels = data["metrics"]["validation"]
-    return min(level["batter_runs"]["log_loss"] for level in levels.values())
+    return float(data["metrics"]["validation"][level]["batter_runs"]["log_loss"])
 
 
 def train_representations(
@@ -216,14 +257,16 @@ def train_representations(
     baseline_metrics_path: Path | None = None,
     max_train_batches: int | None = None,
     max_validation_batches: int | None = None,
+    device_name: str = "auto",
 ) -> dict[str, Any]:
     config = training_config or TrainingConfig()
     seed_everything(config.seed)
     torch.set_float32_matmul_precision("high")
-    device = choose_device()
+    device = choose_device(device_name)
 
     vocab = json.loads((model_data_dir / "vocab.json").read_text(encoding="utf-8"))
     manifest = json.loads((model_data_dir / "manifest.json").read_text(encoding="utf-8"))
+    baseline_level = str(manifest.get("baseline_features", {}).get("level", "context"))
     train_dataset = EncodedDeliveryDataset(model_data_dir / "train.parquet")
     validation_dataset = EncodedDeliveryDataset(model_data_dir / "validation.parquet")
     generator = torch.Generator().manual_seed(config.seed)
@@ -247,6 +290,7 @@ def train_representations(
         n_batters=len(vocab["batters"]) + 1,
         n_bowlers=len(vocab["bowlers"]) + 1,
         n_venues=len(vocab["venues"]) + 1,
+        use_baseline_residual=config.use_baseline_residual,
     )
     model = PlayerRepresentationModel(model_config).to(device)
     embedding_parameters = []
@@ -272,12 +316,16 @@ def train_representations(
     history = []
     best_loss = math.inf
     epochs_without_improvement = 0
-    baseline_runs_log_loss = _baseline_validation_runs_log_loss(baseline_metrics_path)
+    baseline_runs_log_loss = _baseline_validation_runs_log_loss(
+        baseline_metrics_path, level=baseline_level
+    )
 
     print(
         f"device={device} train={len(train_dataset):,} "
         f"validation={len(validation_dataset):,} "
-        f"batters={model_config.n_batters - 1:,} bowlers={model_config.n_bowlers - 1:,}"
+        f"batters={model_config.n_batters - 1:,} bowlers={model_config.n_bowlers - 1:,} "
+        f"ablation={config.ablation} residual={config.use_baseline_residual} "
+        f"baseline_level={baseline_level}"
     )
     for epoch in range(1, config.epochs + 1):
         train_metrics = run_epoch(
@@ -287,6 +335,7 @@ def train_representations(
             config,
             optimizer=optimizer,
             max_batches=max_train_batches,
+            label=f"epoch {epoch}/{config.epochs} train",
         )
         validation_metrics = run_epoch(
             model,
@@ -295,6 +344,7 @@ def train_representations(
             config,
             optimizer=None,
             max_batches=max_validation_batches,
+            label=f"epoch {epoch}/{config.epochs} validation",
         )
         epoch_result = {
             "epoch": epoch,
@@ -319,6 +369,7 @@ def train_representations(
                     "vocab": vocab,
                     "best_epoch": epoch,
                     "validation_metrics": validation_metrics,
+                    "baseline_level": baseline_level,
                     "baseline_validation_runs_log_loss": baseline_runs_log_loss,
                 },
                 checkpoint_path,
@@ -332,6 +383,7 @@ def train_representations(
         "device": str(device),
         "best_validation_loss": best_loss,
         "checkpoint": str(checkpoint_path),
+        "baseline_level": baseline_level,
         "baseline_validation_runs_log_loss": baseline_runs_log_loss,
         "history": history,
     }
@@ -354,6 +406,21 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument("--max-train-batches", type=int)
     parser.add_argument("--max-validation-batches", type=int)
+    parser.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda", "mps"),
+        default="auto",
+    )
+    parser.add_argument(
+        "--ablation",
+        choices=("none", "no_players", "no_batter", "no_bowler", "no_venue"),
+        default="none",
+    )
+    parser.add_argument(
+        "--no-baseline-residual",
+        action="store_true",
+        help="Train standalone logits instead of residual-over-baseline",
+    )
     args = parser.parse_args()
 
     result = train_representations(
@@ -362,10 +429,13 @@ def main() -> None:
         training_config=TrainingConfig(
             epochs=args.epochs,
             batch_size=args.batch_size,
+            ablation=args.ablation,
+            use_baseline_residual=not args.no_baseline_residual,
         ),
         baseline_metrics_path=args.baseline_metrics,
         max_train_batches=args.max_train_batches,
         max_validation_batches=args.max_validation_batches,
+        device_name=args.device,
     )
     print(json.dumps(result, indent=2))
 

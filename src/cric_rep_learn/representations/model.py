@@ -20,6 +20,9 @@ class ModelConfig:
     hidden_dim: int = 256
     dropout: float = 0.10
     id_dropout: float = 0.05
+    venue_dropout: float = 0.05
+    numeric_features: int = 11
+    use_baseline_residual: bool = True
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -46,7 +49,7 @@ class PlayerRepresentationModel(nn.Module):
         self.innings_group_embedding = nn.Embedding(4, config.context_dim)
         self.wickets_bucket_embedding = nn.Embedding(4, config.context_dim)
         self.numeric_projection = nn.Sequential(
-            nn.Linear(7, config.numeric_dim),
+            nn.Linear(config.numeric_features, config.numeric_dim),
             nn.LayerNorm(config.numeric_dim),
             nn.SiLU(),
         )
@@ -92,11 +95,32 @@ class PlayerRepresentationModel(nn.Module):
                 nn.init.xavier_uniform_(module.weight)
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
+        if self.config.use_baseline_residual:
+            residual_heads = (
+                self.runs_head,
+                self.extras_head,
+                self.legality_head,
+                self.batter_dismissal_head,
+                self.bowler_wicket_head,
+            )
+            for head in residual_heads:
+                nn.init.normal_(head.weight, mean=0.0, std=1e-3)
 
-    def forward(self, categorical: torch.Tensor, numeric: torch.Tensor) -> dict[str, torch.Tensor]:
-        batter = self.batting_embedding(self._apply_id_dropout(categorical[:, 0]))
-        bowler = self.bowling_embedding(self._apply_id_dropout(categorical[:, 1]))
-        venue = self.venue_embedding(categorical[:, 2])
+    def forward(
+        self,
+        categorical: torch.Tensor,
+        numeric: torch.Tensor,
+        baseline_probabilities: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        batter = self.batting_embedding(
+            self._apply_index_dropout(categorical[:, 0], self.config.id_dropout)
+        )
+        bowler = self.bowling_embedding(
+            self._apply_index_dropout(categorical[:, 1], self.config.id_dropout)
+        )
+        venue = self.venue_embedding(
+            self._apply_index_dropout(categorical[:, 2], self.config.venue_dropout)
+        )
         phase = self.phase_embedding(categorical[:, 3])
         gender = self.gender_embedding(categorical[:, 4])
         team_type = self.team_type_embedding(categorical[:, 5])
@@ -121,18 +145,42 @@ class PlayerRepresentationModel(nn.Module):
             dim=-1,
         )
         hidden = self.trunk(interaction)
+        residual_runs = self.runs_head(hidden)
+        residual_extras = self.extras_head(hidden)
+        residual_legality = self.legality_head(hidden)
+        residual_dismissal = self.batter_dismissal_head(hidden).squeeze(-1)
+        residual_wicket = self.bowler_wicket_head(hidden).squeeze(-1)
+        if not self.config.use_baseline_residual:
+            return {
+                "runs_logits": residual_runs,
+                "extras_logits": residual_extras,
+                "legality_logits": residual_legality,
+                "batter_dismissal_logit": residual_dismissal,
+                "bowler_wicket_logit": residual_wicket,
+            }
+
+        baseline_probabilities = baseline_probabilities.clamp(1e-7, 1.0 - 1e-7)
+        runs_prior = baseline_probabilities[:, :8].log()
+        extras_prior = baseline_probabilities[:, 8:16].log()
+        legality_prior = baseline_probabilities[:, 16:19].log()
+        dismissal_prior = self._binary_logit(baseline_probabilities[:, 19])
+        wicket_prior = self._binary_logit(baseline_probabilities[:, 20])
         return {
-            "runs_logits": self.runs_head(hidden),
-            "extras_logits": self.extras_head(hidden),
-            "legality_logits": self.legality_head(hidden),
-            "batter_dismissal_logit": self.batter_dismissal_head(hidden).squeeze(-1),
-            "bowler_wicket_logit": self.bowler_wicket_head(hidden).squeeze(-1),
+            "runs_logits": runs_prior + residual_runs,
+            "extras_logits": extras_prior + residual_extras,
+            "legality_logits": legality_prior + residual_legality,
+            "batter_dismissal_logit": dismissal_prior + residual_dismissal,
+            "bowler_wicket_logit": wicket_prior + residual_wicket,
         }
 
-    def _apply_id_dropout(self, ids: torch.Tensor) -> torch.Tensor:
-        if not self.training or self.config.id_dropout <= 0:
+    @staticmethod
+    def _binary_logit(probability: torch.Tensor) -> torch.Tensor:
+        return probability.log() - torch.log1p(-probability)
+
+    def _apply_index_dropout(self, ids: torch.Tensor, probability: float) -> torch.Tensor:
+        if not self.training or probability <= 0:
             return ids
-        dropped = torch.rand(ids.shape, device=ids.device) < self.config.id_dropout
+        dropped = torch.rand(ids.shape, device=ids.device) < probability
         return torch.where(dropped, torch.zeros_like(ids), ids)
 
     def batting_embeddings(self) -> torch.Tensor:

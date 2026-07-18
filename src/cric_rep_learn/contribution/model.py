@@ -1,4 +1,4 @@
-"""Batter embeddings trained from residual contribution over context rates."""
+"""Batter×bowling-attack embeddings for residual contribution."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from torch import nn
 @dataclass(frozen=True, slots=True)
 class ModelConfig:
     n_batters: int
+    n_bowlers: int
     n_venues: int
     player_dim: int = 32
     venue_dim: int = 16
@@ -20,6 +21,7 @@ class ModelConfig:
     dropout: float = 0.10
     id_dropout: float = 0.05
     venue_dropout: float = 0.05
+    bowler_dropout: float = 0.05
     numeric_features: int = 3
     use_baseline_residual: bool = True
 
@@ -29,17 +31,15 @@ class ModelConfig:
 
 class BatterContributionModel(nn.Module):
     """
-    Predicts stint runs as context baseline + neural residual.
-
-    ``baseline_runs`` is train-only context strike rate × balls faced. The
-    residual head starts near zero so early predictions match the opportunity
-    baseline; batter identity must improve on that.
+    Predicts stint runs as context baseline + residual conditioned on the
+    bowling attack faced (weighted top-K bowler embeddings).
     """
 
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
         self.batting_embedding = nn.Embedding(config.n_batters, config.player_dim)
+        self.bowling_embedding = nn.Embedding(config.n_bowlers, config.player_dim)
         self.venue_embedding = nn.Embedding(config.n_venues, config.venue_dim)
         self.phase_embedding = nn.Embedding(4, config.context_dim)
         self.gender_embedding = nn.Embedding(3, config.context_dim)
@@ -52,7 +52,7 @@ class BatterContributionModel(nn.Module):
             nn.SiLU(),
         )
         trunk_in = (
-            config.player_dim
+            config.player_dim * 4
             + config.venue_dim
             + config.context_dim * 5
             + config.numeric_dim
@@ -75,6 +75,7 @@ class BatterContributionModel(nn.Module):
     def _initialize(self) -> None:
         for embedding in (
             self.batting_embedding,
+            self.bowling_embedding,
             self.venue_embedding,
             self.phase_embedding,
             self.gender_embedding,
@@ -101,18 +102,39 @@ class BatterContributionModel(nn.Module):
         dropped[mask & known] = 0
         return dropped
 
+    def _attack_embedding(
+        self, bowler_idxs: torch.Tensor, bowler_weights: torch.Tensor
+    ) -> torch.Tensor:
+        idxs = self._dropout_ids(bowler_idxs, self.config.bowler_dropout)
+        embedded = self.bowling_embedding(idxs)  # [batch, k, dim]
+        weights = bowler_weights.unsqueeze(-1)
+        weight_sum = weights.sum(dim=1, keepdim=True).clamp_min(1e-6)
+        return (embedded * weights).sum(dim=1) / weight_sum.squeeze(-1)
+
     def forward(
         self,
         categorical: torch.Tensor,
         numeric: torch.Tensor,
         baseline_runs: torch.Tensor | None = None,
+        bowler_idxs: torch.Tensor | None = None,
+        bowler_weights: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
-        batter = self._dropout_ids(categorical[:, 0], self.config.id_dropout)
-        venue = self._dropout_ids(categorical[:, 1], self.config.venue_dropout)
+        if bowler_idxs is None or bowler_weights is None:
+            raise ValueError("bowler_idxs and bowler_weights are required")
+        batter = self.batting_embedding(
+            self._dropout_ids(categorical[:, 0], self.config.id_dropout)
+        )
+        attack = self._attack_embedding(bowler_idxs, bowler_weights)
+        venue = self.venue_embedding(
+            self._dropout_ids(categorical[:, 1], self.config.venue_dropout)
+        )
         features = torch.cat(
             [
-                self.batting_embedding(batter),
-                self.venue_embedding(venue),
+                batter,
+                attack,
+                batter * attack,
+                torch.abs(batter - attack),
+                venue,
                 self.phase_embedding(categorical[:, 2]),
                 self.gender_embedding(categorical[:, 3]),
                 self.team_type_embedding(categorical[:, 4]),
@@ -139,3 +161,7 @@ class BatterContributionModel(nn.Module):
     @torch.no_grad()
     def batting_embeddings(self) -> torch.Tensor:
         return self.batting_embedding.weight.detach().cpu().clone()
+
+    @torch.no_grad()
+    def bowling_embeddings(self) -> torch.Tensor:
+        return self.bowling_embedding.weight.detach().cpu().clone()

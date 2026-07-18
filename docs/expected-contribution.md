@@ -128,9 +128,64 @@ batter IDs still do not. Stop further residual tweaks on this label; next work
 should change the representation target (e.g. player-level ranking / pairwise
 preference, or bowling-conditioned contribution) rather than the prior.
 
+## Bowling-conditioned residual
+
+Stints are also conditioned on the **bowling attack faced**:
+
+```text
+attack = Σ_k w_k · bowling_emb(bowler_k)
+       where w_k = balls from bowler_k / balls_faced
+       and k indexes the top-4 bowlers by balls
+```
+
+The residual network sees batter, attack, product, and absolute difference, so
+Rohit-vs-Starc style signal can enter without requiring two batters to share an
+innings.
+
+```bash
+cric-build-contribution-data \
+  --output artifacts/contribution-data-bowling \
+  --overwrite
+
+cric-train-contribution \
+  --data artifacts/contribution-data-bowling \
+  --output artifacts/checkpoints/contribution-bowling-full \
+  --device mps
+
+cric-train-contribution \
+  --data artifacts/contribution-data-bowling \
+  --output artifacts/checkpoints/contribution-bowling-no-players \
+  --ablation no_players \
+  --device mps
+
+cric-train-contribution \
+  --data artifacts/contribution-data-bowling \
+  --output artifacts/checkpoints/contribution-bowling-no-bowler \
+  --ablation no_bowler \
+  --device mps
+```
+
+Gate remains validation MAE gap ≥ 0.5 vs `no_players` (and optionally vs
+`no_bowler`).
+
+### Bowling-conditioned MPS result
+
+| Model | Val MAE (`balls ≥ 3`) |
+| --- | ---: |
+| Context SR × balls | 5.984 |
+| Full (batter + attack) | 5.396 |
+| No players | **5.284** |
+| No bowler | **5.275** |
+| Gap vs no_players | **-0.11** (fails ≥ 0.5 gate) |
+
+Conditioning on the bowling attack does not rescue player identity under this
+label either. Ablating batters or bowlers both slightly *improve* MAE, so the
+useful residual is still match/context/opportunity structure.
+
 ## Next after a pass
 
-1. Bowling stints with the same fixed-opportunity gate.
-2. Map `(runs, dismissals, boundaries)` to Dream11 batting points.
+1. Change the target away from absolute/residual runs MAE (e.g. within-context
+   ranking of batters, or calibrate player effects with stronger pooling).
+2. Map contribution outputs to Dream11 batting points only after IDs pass a gate.
 3. Opportunity / XI modelling on top of validated embeddings.
 

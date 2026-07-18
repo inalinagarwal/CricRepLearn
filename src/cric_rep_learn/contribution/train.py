@@ -57,17 +57,24 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
 
 
-def _apply_ablation(categorical: torch.Tensor, ablation: str) -> torch.Tensor:
+def _apply_ablation(
+    categorical: torch.Tensor,
+    bowler_idxs: torch.Tensor,
+    ablation: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
     if ablation == "none":
-        return categorical
+        return categorical, bowler_idxs
     categorical = categorical.clone()
+    bowler_idxs = bowler_idxs.clone()
     if ablation in {"no_players", "no_batter"}:
         categorical[:, 0] = 0
+    if ablation in {"no_players", "no_bowler"}:
+        bowler_idxs.zero_()
     if ablation == "no_venue":
         categorical[:, 1] = 0
-    if ablation not in {"none", "no_players", "no_batter", "no_venue"}:
+    if ablation not in {"none", "no_players", "no_batter", "no_bowler", "no_venue"}:
         raise ValueError(f"Unknown ablation {ablation!r}")
-    return categorical
+    return categorical, bowler_idxs
 
 
 def contribution_loss(
@@ -161,13 +168,25 @@ def run_epoch(
     total_batches = len(loader)
     report_every = max(1, total_batches // 10)
     for batch_index, batch in enumerate(loader, start=1):
-        categorical, numeric, baseline, targets, _balls, eval_eligible = batch
-        categorical = _apply_ablation(categorical.to(device), config.ablation)
+        (
+            categorical,
+            numeric,
+            baseline,
+            bowler_idxs,
+            bowler_weights,
+            targets,
+            _balls,
+            eval_eligible,
+        ) = batch
+        categorical, bowler_idxs = _apply_ablation(
+            categorical.to(device), bowler_idxs.to(device), config.ablation
+        )
         numeric = numeric.to(device)
         baseline = baseline.to(device)
+        bowler_weights = bowler_weights.to(device)
         targets = targets.to(device)
         eval_eligible = eval_eligible.to(device)
-        outputs = model(categorical, numeric, baseline)
+        outputs = model(categorical, numeric, baseline, bowler_idxs, bowler_weights)
         loss = contribution_loss(outputs, targets, config)
         if training:
             optimizer.zero_grad(set_to_none=True)
@@ -216,6 +235,7 @@ def train_contribution(
 
     model_config = ModelConfig(
         n_batters=len(vocab["batters"]),
+        n_bowlers=len(vocab["bowlers"]),
         n_venues=len(vocab["venues"]),
     )
     model = BatterContributionModel(model_config).to(device)
@@ -246,7 +266,9 @@ def train_contribution(
     print(
         f"device={device} train={len(train_dataset):,} "
         f"validation={len(validation_dataset):,} "
-        f"batters={model_config.n_batters - 1:,} ablation={config.ablation}"
+        f"batters={model_config.n_batters - 1:,} "
+        f"bowlers={model_config.n_bowlers - 1:,} "
+        f"ablation={config.ablation}"
     )
     for epoch in range(1, config.epochs + 1):
         train_metrics = run_epoch(
@@ -321,7 +343,7 @@ def main() -> None:
     parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
     parser.add_argument(
         "--ablation",
-        choices=("none", "no_players", "no_batter", "no_venue"),
+        choices=("none", "no_players", "no_batter", "no_bowler", "no_venue"),
         default="none",
     )
     args = parser.parse_args()

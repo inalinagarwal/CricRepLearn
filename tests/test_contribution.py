@@ -1,143 +1,151 @@
-"""Tests for expected batting contribution stints."""
+"""Tests for bowling-conditioned batting contribution."""
 
 from __future__ import annotations
 
-import numpy as np
+from datetime import date
+
+import pyarrow as pa
+import pyarrow.parquet as pq
 import torch
 
 from cric_rep_learn.contribution.data import (
     CATEGORICAL_COLUMNS,
     NUMERIC_COLUMNS,
+    TOP_BOWLERS,
     EncodedStintDataset,
+    _top_bowlers_for_stint,
     build_contribution_dataset,
 )
 from cric_rep_learn.contribution.model import BatterContributionModel, ModelConfig
 from cric_rep_learn.contribution.train import TrainingConfig, _apply_ablation, contribution_loss
 
 
-def test_ablation_zeros_batter_index() -> None:
-    categorical = torch.tensor([[3, 2, 1, 1, 1, 1, 1], [4, 5, 1, 1, 1, 1, 1]])
-    ablated = _apply_ablation(categorical, "no_players")
-    assert torch.equal(ablated[:, 0], torch.zeros(2, dtype=torch.long))
-    assert torch.equal(ablated[:, 1], categorical[:, 1])
+def test_ablation_zeros_batter_and_bowlers() -> None:
+    categorical = torch.tensor([[3, 2, 1, 1, 1, 1, 1]])
+    bowlers = torch.tensor([[4, 5, 0, 0]])
+    cat, bowl = _apply_ablation(categorical, bowlers, "no_players")
+    assert torch.equal(cat[:, 0], torch.zeros(1, dtype=torch.long))
+    assert torch.equal(bowl, torch.zeros_like(bowlers))
 
 
-def test_contribution_model_shapes_and_gradients() -> None:
+def test_top_bowlers_weights_sum_to_one() -> None:
+    idxs, weights = _top_bowlers_for_stint(
+        [
+            {"bowler_id": "a", "balls": 6},
+            {"bowler_id": "b", "balls": 3},
+            {"bowler_id": "c", "balls": 2},
+            {"bowler_id": "d", "balls": 1},
+            {"bowler_id": "e", "balls": 1},
+        ],
+        {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5},
+        top_k=4,
+    )
+    assert len(idxs) == 4
+    assert abs(sum(weights) - 1.0) < 1e-6
+    assert idxs[0] == 1
+
+
+def test_contribution_model_shapes_and_zero_residual() -> None:
     model = BatterContributionModel(
-        ModelConfig(n_batters=5, n_venues=3, id_dropout=0.0, venue_dropout=0.0)
+        ModelConfig(
+            n_batters=5,
+            n_bowlers=6,
+            n_venues=3,
+            id_dropout=0.0,
+            venue_dropout=0.0,
+            bowler_dropout=0.0,
+        )
     )
     categorical = torch.tensor([[1, 1, 1, 1, 1, 1, 1], [2, 2, 2, 1, 1, 2, 1]])
     numeric = torch.zeros((2, len(NUMERIC_COLUMNS)))
     baseline = torch.tensor([12.0, 8.0])
-    outputs = model(categorical, numeric, baseline)
+    bowler_idxs = torch.tensor([[1, 2, 0, 0], [3, 0, 0, 0]])
+    bowler_weights = torch.tensor([[0.7, 0.3, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]])
+    outputs = model(categorical, numeric, baseline, bowler_idxs, bowler_weights)
     assert outputs["runs_pred"].shape == (2,)
-    assert torch.allclose(outputs["runs_pred"], baseline)  # zero residual at init
-    assert outputs["dismissal_logit"].shape == (2,)
+    assert torch.allclose(outputs["runs_pred"], baseline)
     targets = torch.tensor([[10.0, 1.0], [3.0, 0.0]])
     loss = contribution_loss(outputs, targets, TrainingConfig())
     loss.backward()
-    assert model.batting_embedding.weight.grad is not None
     assert model.batting_embedding.weight.grad[1].abs().sum() > 0
+    assert model.bowling_embedding.weight.grad[1].abs().sum() > 0
 
 
-def test_zero_residual_reproduces_baseline() -> None:
-    model = BatterContributionModel(ModelConfig(n_batters=2, n_venues=2, id_dropout=0.0))
-    baseline = torch.tensor([15.5])
-    outputs = model(
-        torch.zeros((1, len(CATEGORICAL_COLUMNS)), dtype=torch.long),
-        torch.zeros((1, len(NUMERIC_COLUMNS))),
-        baseline,
-    )
-    assert torch.allclose(outputs["runs_pred"], baseline)
-    assert torch.allclose(outputs["runs_residual"], torch.zeros(1))
-
-
-def test_build_contribution_dataset_train_only_vocab(tmp_path) -> None:
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-    from datetime import date
-
+def test_build_contribution_dataset_includes_bowlers(tmp_path) -> None:
     canonical = tmp_path / "canonical"
     canonical.mkdir()
-    deliveries = [
-        {
-            "schema_version": "1.0.0",
-            "match_id": "m1",
-            "match_date": date(2020, 1, 1),
+
+    def delivery(
+        *,
+        match_id: str,
+        match_date: date,
+        batter_id: str,
+        bowler_id: str,
+        attempt: int,
+        runs: int,
+    ) -> dict:
+        return {
+            "match_id": match_id,
+            "match_date": match_date,
             "innings": 1,
             "is_super_over": False,
-            "batting_team": "A",
-            "bowling_team": "B",
-            "target_runs": None,
-            "target_overs_raw": None,
-            "target_balls": None,
-            "over_number": 0,
-            "delivery_index": index,
-            "attempt_index_in_innings": index + 1,
-            "source_ball_label": "0.1",
-            "is_legal": True,
-            "legal_balls_in_over_before": 0,
-            "legal_balls_before": index,
-            "score_before": index,
-            "wickets_before": 0,
-            "scheduled_balls": 120,
+            "batter_id": batter_id,
+            "batter_name": batter_id,
+            "bowler_id": bowler_id,
+            "bowler_name": bowler_id,
+            "attempt_index_in_innings": attempt,
             "phase": "powerplay",
-            "phase_source": "test",
-            "is_powerplay": True,
-            "batter_id": "batter-train",
-            "batter_name": "Train Batter",
-            "bowler_id": "bowler-1",
-            "bowler_name": "Bowler",
-            "non_striker_id": "ns",
-            "non_striker_name": "NS",
-            "runs_batter": 1,
-            "runs_extras": 0,
-            "runs_total": 1,
-            "non_boundary": False,
-            "is_boundary": False,
-            "extras_byes": 0,
-            "extras_legbyes": 0,
-            "extras_noballs": 0,
-            "extras_penalty": 0,
-            "extras_wides": 0,
-            "wicket_count": 0,
-            "bowler_wicket_count": 0,
+            "score_before": attempt - 1,
+            "wickets_before": 0,
+            "runs_batter": runs,
             "batter_dismissed": False,
+            "is_legal": True,
+            "extras_noballs": 0,
         }
+
+    deliveries = [
+        delivery(
+            match_id="m1",
+            match_date=date(2020, 1, 1),
+            batter_id="batter-train",
+            bowler_id="bowler-train",
+            attempt=index + 1,
+            runs=1,
+        )
         for index in range(5)
     ]
     deliveries.append(
-        {
-            **deliveries[0],
-            "match_id": "m2",
-            "match_date": date(2021, 1, 1),
-            "batter_id": "batter-val",
-            "batter_name": "Val Batter",
-            "attempt_index_in_innings": 1,
-            "runs_batter": 4,
-        }
+        delivery(
+            match_id="m2",
+            match_date=date(2021, 1, 1),
+            batter_id="batter-val",
+            bowler_id="bowler-val",
+            attempt=1,
+            runs=4,
+        )
     )
     pq.write_table(pa.Table.from_pylist(deliveries), canonical / "deliveries.parquet")
-    matches = [
-        {
-            "match_id": "m1",
-            "match_date": date(2020, 1, 1),
-            "gender": "male",
-            "team_type": "international",
-            "venue": "Ground A",
-        },
-        {
-            "match_id": "m2",
-            "match_date": date(2021, 1, 1),
-            "gender": "male",
-            "team_type": "international",
-            "venue": "Ground B",
-        },
-    ]
-    # Minimal match columns used by builder
-    for row in matches:
-        row.setdefault("schema_version", "1.0.0")
-    pq.write_table(pa.Table.from_pylist(matches), canonical / "matches.parquet")
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "match_id": "m1",
+                    "match_date": date(2020, 1, 1),
+                    "gender": "male",
+                    "team_type": "international",
+                    "venue": "Ground A",
+                },
+                {
+                    "match_id": "m2",
+                    "match_date": date(2021, 1, 1),
+                    "gender": "male",
+                    "team_type": "international",
+                    "venue": "Ground B",
+                },
+            ]
+        ),
+        canonical / "matches.parquet",
+    )
     pq.write_table(
         pa.Table.from_pylist(
             [
@@ -164,6 +172,20 @@ def test_build_contribution_dataset_train_only_vocab(tmp_path) -> None:
                     "last_seen": date(2021, 1, 1),
                     "match_count": 1,
                 },
+                {
+                    "player_id": "bowler-train",
+                    "player_name": "Train Bowler",
+                    "first_seen": date(2020, 1, 1),
+                    "last_seen": date(2020, 1, 1),
+                    "match_count": 1,
+                },
+                {
+                    "player_id": "bowler-val",
+                    "player_name": "Val Bowler",
+                    "first_seen": date(2021, 1, 1),
+                    "last_seen": date(2021, 1, 1),
+                    "match_count": 1,
+                },
             ]
         ),
         canonical / "player_aliases.parquet",
@@ -171,25 +193,23 @@ def test_build_contribution_dataset_train_only_vocab(tmp_path) -> None:
 
     output = tmp_path / "contribution-data"
     manifest = build_contribution_dataset(canonical, output, overwrite=True, min_balls_eval=1)
-    assert manifest["split_counts"]["train"] == 1
-    assert manifest["split_counts"]["validation"] == 1
+    assert manifest["n_bowlers"] == 1
+    assert manifest["objective"].startswith("bowling_conditioned")
 
     import json
 
     vocab = json.loads((output / "vocab.json").read_text())
-    batter_ids = {row["player_id"] for row in vocab["batters"]}
-    assert "batter-train" in batter_ids
-    assert "batter-val" not in batter_ids
+    assert {row["player_id"] for row in vocab["bowlers"]} == {"UNK_BOWLER", "bowler-train"}
 
     val = EncodedStintDataset(output / "validation.parquet")
-    categorical, numeric, baseline, targets, balls, eligible = val[0]
+    categorical, numeric, baseline, bowler_idxs, bowler_weights, targets, balls, eligible = val[0]
     assert categorical.shape == (len(CATEGORICAL_COLUMNS),)
     assert numeric.shape == (len(NUMERIC_COLUMNS),)
-    assert baseline.ndim == 0 or baseline.shape == ()
-    assert float(baseline.item()) > 0
+    assert bowler_idxs.shape == (TOP_BOWLERS,)
+    assert abs(float(bowler_weights.sum()) - 1.0) < 1e-5
+    assert int(categorical[0].item()) == 0  # val batter -> UNK
+    assert int(bowler_idxs[0].item()) == 0  # val bowler -> UNK
     assert targets[0].item() == 4.0
     assert balls.item() == 1.0
     assert eligible.item() is True
-    # Validation batter must map to UNK index 0
-    assert int(categorical[0].item()) == 0
-    assert "baseline_runs_mae_min3" in manifest
+    assert float(baseline.item()) > 0

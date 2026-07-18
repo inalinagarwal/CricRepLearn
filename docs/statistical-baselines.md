@@ -7,13 +7,12 @@ probabilistic forecasts on later matches.
 The rolling hierarchy is:
 
 ```text
-global → context → player → venue → vs_pace → vs_arm_pace → vs_nation_arm_pace → matchup
+global → context → player → venue → vs_pace → matchup
 ```
 
-Archetype levels need `artifacts/player-attributes/` (see
-[`player-centric.md`](player-centric.md)). Without attributes, bowlers collapse
-to `unknown` and those levels add nothing. Numbers below that omit archetype
-rows are the older ID-only reference.
+`vs_arm_pace` and `vs_nation_arm_pace` are still computed for diagnostics and
+player-card fallbacks, but they do not parent the matchup forecast. A first
+full-chain eval showed `vs_pace` best and nation/arm chaining hurt matchup.
 
 ## What one dataset row means
 

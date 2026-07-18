@@ -26,7 +26,7 @@ def test_parse_rohit_offbreak() -> None:
     assert parsed.bowling_family == "offbreak"
 
 
-def test_archetype_level_uses_shared_bowler_style_evidence() -> None:
+def test_matchup_shrinks_toward_vs_pace_not_nation() -> None:
     attrs = {
         "starc": {
             "country": "Australia",
@@ -38,26 +38,27 @@ def test_archetype_level_uses_shared_bowler_style_evidence() -> None:
             "bowling_arm": "left",
             "pace_group": "pace",
         },
-        "right-spinner": {
-            "country": "India",
+        "right-pacer": {
+            "country": "England",
             "bowling_arm": "right",
-            "pace_group": "spin",
+            "pace_group": "pace",
         },
     }
     model = HistoricalBaseline(player_attributes=attrs)
     context = MatchContext(gender="male", team_type="international", venue="Ground")
 
-    for _ in range(40):
-        model.update(delivery("rohit", "other-left-pacer", runs=6), context)
-    for _ in range(40):
-        model.update(delivery("rohit", "right-spinner", runs=0), context)
+    for _ in range(50):
+        model.update(delivery("rohit", "right-pacer", runs=6), context)
+    for _ in range(10):
+        model.update(delivery("rohit", "other-left-pacer", runs=0), context)
+    for _ in range(5):
+        model.update(delivery("rohit", "starc", runs=4), context)
 
     predictions = model.predict_all(delivery("rohit", "starc"), context)
-
-    assert predictions["vs_arm_pace"].evidence["vs_arm_pace"] == 40
-    assert predictions["vs_nation_arm_pace"].evidence["vs_nation_arm_pace"] == 40
-    assert predictions["matchup"].evidence["matchup"] == 0
-    assert predictions["vs_arm_pace"].batter_runs[6] > predictions["venue"].batter_runs[6]
+    # Pace cell has the six-heavy right-pacer balls; nation/arm are six-poor.
+    assert predictions["vs_pace"].batter_runs[6] > predictions["vs_nation_arm_pace"].batter_runs[6]
+    # Matchup must inherit the stronger pace prior, not the sparse nation prior.
+    assert predictions["matchup"].batter_runs[6] > predictions["vs_nation_arm_pace"].batter_runs[6]
 
 
 def test_resolve_player_prefers_full_name_alias() -> None:

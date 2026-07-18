@@ -15,14 +15,20 @@ hierarchical matchup fallbacks instead.
 ```text
 Rohit vs Starc
   ↑ shrink toward
-Rohit vs Australia left-arm pace
-  ↑ shrink toward
-Rohit vs left-arm pace
-  ↑ shrink toward
-Rohit vs pace
+Rohit vs pace          ← matchup prior (validated)
   ↑ shrink toward
 Rohit / venue / context baselines
 ```
+
+Player-card / diagnostic fallbacks still expose finer buckets:
+
+```text
+vs Starc → Australia left-arm pace → left-arm pace → pace → overall
+```
+
+Those finer levels are useful for sparse-data storytelling, but the rolling
+baseline no longer chains matchup through nation/arm after they hurt validation
+log loss.
 
 Bowler archetypes come from external attributes (cricketdata / ESPNcricinfo),
 joined on Cricsheet `player_id`:

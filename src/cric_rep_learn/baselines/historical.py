@@ -107,13 +107,17 @@ class HistoricalBaseline:
     for that date, so matches without known start times cannot leak into each
     other.
 
-    When ``player_attributes`` is provided, intermediate batter×bowler-archetype
-    levels sit between venue and direct matchup:
+    When ``player_attributes`` is provided, batter×bowler-archetype levels sit
+    between venue and direct matchup. The **prediction shrink path** is:
 
-    ``vs_pace`` → ``vs_arm_pace`` → ``vs_nation_arm_pace`` → ``matchup``
+    ``venue → vs_pace → matchup``
 
-    Example for Rohit vs Starc: pace → left-arm pace → Australia left-arm pace
-    → Starc.
+    ``vs_arm_pace`` and ``vs_nation_arm_pace`` are still estimated (for coverage
+    diagnostics and player-card fallbacks) but they do **not** feed matchup,
+    because chaining through sparse nation/arm cells previously hurt log loss.
+
+    Example for Rohit vs Starc: pace prior → Starc residual, with left-arm pace
+    and Australia left-arm pace available as side diagnostics.
     """
 
     def __init__(
@@ -384,6 +388,7 @@ class HistoricalBaseline:
             player_venue_probability,
             self.smoothing.vs_pace,
         )
+        # Side diagnostics: arm/nation shrink from pace but do not parent matchup.
         vs_arm_pace_probability = _multiclass_posterior(
             getattr(vs_arm_pace_stats, field_name),
             vs_arm_pace_stats.n,
@@ -399,7 +404,7 @@ class HistoricalBaseline:
         matchup_probability = _multiclass_posterior(
             getattr(matchup_stats, field_name),
             matchup_stats.n,
-            vs_nation_probability,
+            vs_pace_probability,
             self.smoothing.matchup,
         )
         return {
@@ -484,7 +489,7 @@ class HistoricalBaseline:
         matchup_probability = _binary_posterior(
             int(getattr(matchup_stats, field_name)),
             matchup_stats.n,
-            vs_nation_probability,
+            vs_pace_probability,
             self.smoothing.matchup,
         )
         return {

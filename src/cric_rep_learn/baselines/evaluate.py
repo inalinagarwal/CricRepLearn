@@ -67,16 +67,32 @@ class EvidenceMetrics:
     batter_seen: int = 0
     bowler_seen: int = 0
     venue_seen: int = 0
+    vs_pace_seen: int = 0
+    vs_arm_pace_seen: int = 0
+    vs_nation_arm_pace_seen: int = 0
     matchup_seen: int = 0
     batter_evidence_sum: int = 0
     bowler_evidence_sum: int = 0
     venue_evidence_sum: int = 0
+    vs_pace_evidence_sum: int = 0
+    vs_arm_pace_evidence_sum: int = 0
+    vs_nation_arm_pace_evidence_sum: int = 0
     matchup_evidence_sum: int = 0
+
+    _KEYS = (
+        "batter",
+        "bowler",
+        "venue",
+        "vs_pace",
+        "vs_arm_pace",
+        "vs_nation_arm_pace",
+        "matchup",
+    )
 
     def update(self, evidence: dict[str, int]) -> None:
         self.n += 1
-        for key in ("batter", "bowler", "venue", "matchup"):
-            value = evidence[key]
+        for key in self._KEYS:
+            value = evidence.get(key, 0)
             setattr(self, f"{key}_seen", getattr(self, f"{key}_seen") + int(value > 0))
             setattr(
                 self,
@@ -88,7 +104,7 @@ class EvidenceMetrics:
         if not self.n:
             return {"n": 0}
         result: dict[str, float | int] = {"n": self.n}
-        for key in ("batter", "bowler", "venue", "matchup"):
+        for key in self._KEYS:
             result[f"{key}_coverage"] = getattr(self, f"{key}_seen") / self.n
             result[f"{key}_mean_prior_deliveries"] = getattr(self, f"{key}_evidence_sum") / self.n
         return result
@@ -175,9 +191,15 @@ def evaluate_baselines(
     output_path: Path | None = None,
     smoothing: SmoothingConfig | None = None,
     batch_size: int = 100_000,
+    player_attributes_path: Path | None = None,
 ) -> dict[str, Any]:
+    from cric_rep_learn.data.player_attributes import load_attributes_index
+
     smoothing = smoothing or SmoothingConfig()
-    model = HistoricalBaseline(smoothing)
+    attributes = None
+    if player_attributes_path is not None and player_attributes_path.exists():
+        attributes = load_attributes_index(player_attributes_path)
+    model = HistoricalBaseline(smoothing, player_attributes=attributes)
     metrics = {
         split: {level: MetricBundle() for level in BASELINE_LEVELS}
         for split in ("validation", "test")
@@ -217,6 +239,10 @@ def evaluate_baselines(
         "first_date": first_date.isoformat() if first_date else None,
         "last_date": last_date.isoformat() if last_date else None,
         "smoothing": asdict(smoothing),
+        "player_attributes": (
+            str(player_attributes_path.resolve()) if player_attributes_path else None
+        ),
+        "player_attributes_loaded": attributes is not None,
         "metrics": {
             split: {level: bundle.as_dict() for level, bundle in split_metrics.items()}
             for split, split_metrics in metrics.items()
@@ -238,9 +264,20 @@ def main() -> None:
         type=Path,
         default=Path("artifacts/baselines/metrics.json"),
     )
+    parser.add_argument(
+        "--player-attributes",
+        type=Path,
+        default=Path("artifacts/player-attributes/player_attributes.parquet"),
+    )
     parser.add_argument("--batch-size", type=int, default=100_000)
     args = parser.parse_args()
-    result = evaluate_baselines(args.dataset, output_path=args.output, batch_size=args.batch_size)
+    attributes_path = args.player_attributes if args.player_attributes.exists() else None
+    result = evaluate_baselines(
+        args.dataset,
+        output_path=args.output,
+        batch_size=args.batch_size,
+        player_attributes_path=attributes_path,
+    )
     summary = {
         split: {
             level: {

@@ -94,6 +94,7 @@ def build_model_dataset(
     *,
     overwrite: bool = False,
     baseline_level: str = "context",
+    player_attributes_path: Path | None = None,
 ) -> dict[str, Any]:
     if baseline_level not in BASELINE_LEVELS:
         raise ValueError(
@@ -112,10 +113,14 @@ def build_model_dataset(
     aliases = _escape_sql_path(canonical_dir / "player_aliases.parquet")
     split_manifest = _escape_sql_path(canonical_dir / "split_manifest.parquet")
     baseline_features_path = output_dir / "baseline_features.parquet"
+    if player_attributes_path is None:
+        default_attrs = Path("artifacts/player-attributes/player_attributes.parquet")
+        player_attributes_path = default_attrs if default_attrs.exists() else None
     baseline_feature_metadata = generate_baseline_features(
         canonical_dir,
         baseline_features_path,
         level=baseline_level,
+        player_attributes_path=player_attributes_path,
     )
     baseline_features = _escape_sql_path(baseline_features_path)
 

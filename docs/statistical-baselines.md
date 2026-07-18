@@ -4,6 +4,17 @@ The baselines establish how much can be predicted without neural
 representations. A learned embedding model is useful only if it improves
 probabilistic forecasts on later matches.
 
+The rolling hierarchy is:
+
+```text
+global → context → player → venue → vs_pace → vs_arm_pace → vs_nation_arm_pace → matchup
+```
+
+Archetype levels need `artifacts/player-attributes/` (see
+[`player-centric.md`](player-centric.md)). Without attributes, bowlers collapse
+to `unknown` and those levels add nothing. Numbers below that omit archetype
+rows are the older ID-only reference.
+
 ## What one dataset row means
 
 The canonical dataset is not a collection of player career averages. Its

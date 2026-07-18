@@ -126,12 +126,19 @@ def generate_baseline_features(
     level: str = "context",
     smoothing: SmoothingConfig | None = None,
     batch_size: int = 100_000,
+    player_attributes_path: Path | None = None,
 ) -> dict[str, Any]:
     if level not in BASELINE_LEVELS:
         raise ValueError(f"Unknown baseline level {level!r}; expected one of {BASELINE_LEVELS}")
 
+    from cric_rep_learn.data.player_attributes import load_attributes_index
+
+    attributes = None
+    if player_attributes_path is not None and player_attributes_path.exists():
+        attributes = load_attributes_index(player_attributes_path)
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    model = HistoricalBaseline(smoothing)
+    model = HistoricalBaseline(smoothing, player_attributes=attributes)
     writer = pq.ParquetWriter(output_path, _feature_schema(), compression="zstd")
     connection, reader = _ordered_reader(canonical_dir, batch_size)
     current_date: date | None = None

@@ -10,7 +10,16 @@ import numpy as np
 N_RUN_CLASSES = 8  # 0..6 and the observed seven-run class
 N_EXTRAS_CLASSES = 8  # 0..6 and 7+ (rare penalty events are capped)
 N_LEGALITY_CLASSES = 3  # legal, wide, no-ball
-BASELINE_LEVELS = ("global", "context", "player", "venue", "matchup")
+BASELINE_LEVELS = (
+    "global",
+    "context",
+    "player",
+    "venue",
+    "vs_pace",
+    "vs_arm_pace",
+    "vs_nation_arm_pace",
+    "matchup",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +36,9 @@ class SmoothingConfig:
     context: float = 2_000.0
     player: float = 200.0
     venue: float = 500.0
+    vs_pace: float = 150.0
+    vs_arm_pace: float = 100.0
+    vs_nation_arm_pace: float = 80.0
     matchup: float = 60.0
     context_residual_weight: float = 0.25
     venue_max_weight: float = 0.25
@@ -94,19 +106,44 @@ class HistoricalBaseline:
     Evaluation predicts all matches on a calendar date before calling ``update``
     for that date, so matches without known start times cannot leak into each
     other.
+
+    When ``player_attributes`` is provided, intermediate batter×bowler-archetype
+    levels sit between venue and direct matchup:
+
+    ``vs_pace`` → ``vs_arm_pace`` → ``vs_nation_arm_pace`` → ``matchup``
+
+    Example for Rohit vs Starc: pace → left-arm pace → Australia left-arm pace
+    → Starc.
     """
 
-    def __init__(self, smoothing: SmoothingConfig | None = None):
+    def __init__(
+        self,
+        smoothing: SmoothingConfig | None = None,
+        player_attributes: Mapping[str, Mapping[str, Any]] | None = None,
+    ):
         self.smoothing = smoothing or SmoothingConfig()
+        self.player_attributes = dict(player_attributes or {})
         self.global_stats = EventStats()
         self.context_stats: dict[tuple[Any, ...], EventStats] = {}
         self.batter_stats: dict[tuple[Any, ...], EventStats] = {}
         self.bowler_stats: dict[tuple[Any, ...], EventStats] = {}
         self.venue_stats: dict[tuple[Any, ...], EventStats] = {}
+        self.vs_pace_stats: dict[tuple[Any, ...], EventStats] = {}
+        self.vs_arm_pace_stats: dict[tuple[Any, ...], EventStats] = {}
+        self.vs_nation_arm_pace_stats: dict[tuple[Any, ...], EventStats] = {}
         self.matchup_stats: dict[tuple[Any, ...], EventStats] = {}
 
-    @staticmethod
-    def _keys(row: Mapping[str, Any], context: MatchContext) -> tuple[tuple[Any, ...], ...]:
+    def _bowler_attrs(self, bowler_id: str) -> Mapping[str, Any]:
+        return self.player_attributes.get(
+            bowler_id,
+            {
+                "country": "unknown",
+                "bowling_arm": "unknown",
+                "pace_group": "unknown",
+            },
+        )
+
+    def _keys(self, row: Mapping[str, Any], context: MatchContext) -> tuple[tuple[Any, ...], ...]:
         phase = str(row["phase"])
         super_over = bool(row["is_super_over"])
         innings_group = (
@@ -121,8 +158,10 @@ class HistoricalBaseline:
             phase,
             wickets_bucket,
         )
-        batter_key = (str(row["batter_id"]), phase, super_over)
-        bowler_key = (str(row["bowler_id"]), phase, super_over)
+        batter_id = str(row["batter_id"])
+        bowler_id = str(row["bowler_id"])
+        batter_key = (batter_id, phase, super_over)
+        bowler_key = (bowler_id, phase, super_over)
         venue_key = (
             context.venue,
             context.gender,
@@ -131,13 +170,24 @@ class HistoricalBaseline:
             phase,
             wickets_bucket,
         )
-        matchup_key = (
-            str(row["batter_id"]),
-            str(row["bowler_id"]),
-            phase,
-            super_over,
+        attrs = self._bowler_attrs(bowler_id)
+        country = str(attrs.get("country") or "unknown")
+        arm = str(attrs.get("bowling_arm") or "unknown")
+        pace = str(attrs.get("pace_group") or "unknown")
+        vs_pace_key = (batter_id, pace, phase, super_over)
+        vs_arm_pace_key = (batter_id, arm, pace, phase, super_over)
+        vs_nation_arm_pace_key = (batter_id, country, arm, pace, phase, super_over)
+        matchup_key = (batter_id, bowler_id, phase, super_over)
+        return (
+            context_key,
+            batter_key,
+            bowler_key,
+            venue_key,
+            vs_pace_key,
+            vs_arm_pace_key,
+            vs_nation_arm_pace_key,
+            matchup_key,
         )
-        return context_key, batter_key, bowler_key, venue_key, matchup_key
 
     @staticmethod
     def _stats(store: dict[tuple[Any, ...], EventStats], key: tuple[Any, ...]) -> EventStats:
@@ -164,6 +214,9 @@ class HistoricalBaseline:
                 self.batter_stats,
                 self.bowler_stats,
                 self.venue_stats,
+                self.vs_pace_stats,
+                self.vs_arm_pace_stats,
+                self.vs_nation_arm_pace_stats,
                 self.matchup_stats,
             ),
             keys,
@@ -174,11 +227,23 @@ class HistoricalBaseline:
     def predict_all(
         self, row: Mapping[str, Any], context: MatchContext
     ) -> dict[str, BaselinePrediction]:
-        context_key, batter_key, bowler_key, venue_key, matchup_key = self._keys(row, context)
+        (
+            context_key,
+            batter_key,
+            bowler_key,
+            venue_key,
+            vs_pace_key,
+            vs_arm_pace_key,
+            vs_nation_arm_pace_key,
+            matchup_key,
+        ) = self._keys(row, context)
         context_stats = self._stats(self.context_stats, context_key)
         batter_stats = self._stats(self.batter_stats, batter_key)
         bowler_stats = self._stats(self.bowler_stats, bowler_key)
         venue_stats = self._stats(self.venue_stats, venue_key)
+        vs_pace_stats = self._stats(self.vs_pace_stats, vs_pace_key)
+        vs_arm_pace_stats = self._stats(self.vs_arm_pace_stats, vs_arm_pace_key)
+        vs_nation_stats = self._stats(self.vs_nation_arm_pace_stats, vs_nation_arm_pace_key)
         matchup_stats = self._stats(self.matchup_stats, matchup_key)
 
         run_levels = self._multiclass_levels(
@@ -188,6 +253,9 @@ class HistoricalBaseline:
             batter_stats,
             bowler_stats,
             venue_stats,
+            vs_pace_stats,
+            vs_arm_pace_stats,
+            vs_nation_stats,
             matchup_stats,
         )
         extras_levels = self._multiclass_levels(
@@ -197,6 +265,9 @@ class HistoricalBaseline:
             batter_stats,
             bowler_stats,
             venue_stats,
+            vs_pace_stats,
+            vs_arm_pace_stats,
+            vs_nation_stats,
             matchup_stats,
         )
         legality_levels = self._multiclass_levels(
@@ -206,6 +277,9 @@ class HistoricalBaseline:
             batter_stats,
             bowler_stats,
             venue_stats,
+            vs_pace_stats,
+            vs_arm_pace_stats,
+            vs_nation_stats,
             matchup_stats,
         )
         dismissal_levels = self._binary_levels(
@@ -214,6 +288,9 @@ class HistoricalBaseline:
             batter_stats,
             bowler_stats,
             venue_stats,
+            vs_pace_stats,
+            vs_arm_pace_stats,
+            vs_nation_stats,
             matchup_stats,
         )
         wicket_levels = self._binary_levels(
@@ -222,6 +299,9 @@ class HistoricalBaseline:
             batter_stats,
             bowler_stats,
             venue_stats,
+            vs_pace_stats,
+            vs_arm_pace_stats,
+            vs_nation_stats,
             matchup_stats,
         )
         evidence = {
@@ -230,6 +310,9 @@ class HistoricalBaseline:
             "batter": batter_stats.n,
             "bowler": bowler_stats.n,
             "venue": venue_stats.n,
+            "vs_pace": vs_pace_stats.n,
+            "vs_arm_pace": vs_arm_pace_stats.n,
+            "vs_nation_arm_pace": vs_nation_stats.n,
             "matchup": matchup_stats.n,
         }
         return {
@@ -252,6 +335,9 @@ class HistoricalBaseline:
         batter_stats: EventStats,
         bowler_stats: EventStats,
         venue_stats: EventStats,
+        vs_pace_stats: EventStats,
+        vs_arm_pace_stats: EventStats,
+        vs_nation_stats: EventStats,
         matchup_stats: EventStats,
     ) -> dict[str, np.ndarray]:
         global_counts = getattr(self.global_stats, field_name)
@@ -292,10 +378,28 @@ class HistoricalBaseline:
         player_venue_probability = self._blend_venue(
             player_probability, venue_probability, venue_stats.n
         )
+        vs_pace_probability = _multiclass_posterior(
+            getattr(vs_pace_stats, field_name),
+            vs_pace_stats.n,
+            player_venue_probability,
+            self.smoothing.vs_pace,
+        )
+        vs_arm_pace_probability = _multiclass_posterior(
+            getattr(vs_arm_pace_stats, field_name),
+            vs_arm_pace_stats.n,
+            vs_pace_probability,
+            self.smoothing.vs_arm_pace,
+        )
+        vs_nation_probability = _multiclass_posterior(
+            getattr(vs_nation_stats, field_name),
+            vs_nation_stats.n,
+            vs_arm_pace_probability,
+            self.smoothing.vs_nation_arm_pace,
+        )
         matchup_probability = _multiclass_posterior(
             getattr(matchup_stats, field_name),
             matchup_stats.n,
-            player_venue_probability,
+            vs_nation_probability,
             self.smoothing.matchup,
         )
         return {
@@ -303,6 +407,9 @@ class HistoricalBaseline:
             "context": context_probability,
             "player": player_probability,
             "venue": player_venue_probability,
+            "vs_pace": vs_pace_probability,
+            "vs_arm_pace": vs_arm_pace_probability,
+            "vs_nation_arm_pace": vs_nation_probability,
             "matchup": matchup_probability,
         }
 
@@ -313,6 +420,9 @@ class HistoricalBaseline:
         batter_stats: EventStats,
         bowler_stats: EventStats,
         venue_stats: EventStats,
+        vs_pace_stats: EventStats,
+        vs_arm_pace_stats: EventStats,
+        vs_nation_stats: EventStats,
         matchup_stats: EventStats,
     ) -> dict[str, float]:
         global_successes = int(getattr(self.global_stats, field_name))
@@ -353,10 +463,28 @@ class HistoricalBaseline:
         player_venue_probability = float(
             self._blend_venue(player_probability, venue_probability, venue_stats.n)
         )
+        vs_pace_probability = _binary_posterior(
+            int(getattr(vs_pace_stats, field_name)),
+            vs_pace_stats.n,
+            player_venue_probability,
+            self.smoothing.vs_pace,
+        )
+        vs_arm_pace_probability = _binary_posterior(
+            int(getattr(vs_arm_pace_stats, field_name)),
+            vs_arm_pace_stats.n,
+            vs_pace_probability,
+            self.smoothing.vs_arm_pace,
+        )
+        vs_nation_probability = _binary_posterior(
+            int(getattr(vs_nation_stats, field_name)),
+            vs_nation_stats.n,
+            vs_arm_pace_probability,
+            self.smoothing.vs_nation_arm_pace,
+        )
         matchup_probability = _binary_posterior(
             int(getattr(matchup_stats, field_name)),
             matchup_stats.n,
-            player_venue_probability,
+            vs_nation_probability,
             self.smoothing.matchup,
         )
         return {
@@ -364,7 +492,10 @@ class HistoricalBaseline:
             "context": float(context_probability),
             "player": player_probability,
             "venue": player_venue_probability,
-            "matchup": matchup_probability,
+            "vs_pace": float(vs_pace_probability),
+            "vs_arm_pace": float(vs_arm_pace_probability),
+            "vs_nation_arm_pace": float(vs_nation_probability),
+            "matchup": float(matchup_probability),
         }
 
     def _combine_player_probabilities(

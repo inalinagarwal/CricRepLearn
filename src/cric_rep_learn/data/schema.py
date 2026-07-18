@@ -243,3 +243,25 @@ VENUE_LOCATION_SCHEMA = pa.schema(
         ("verified", pa.bool_()),
     ]
 )
+
+# External table: Cricsheet has no batting hand / bowling style / nationality.
+# Populated from cricketdata player_meta (ESPNcricinfo) joined on cricsheet_id.
+PLAYER_ATTRIBUTES_SCHEMA = pa.schema(
+    [
+        ("player_id", pa.string()),
+        ("player_name", pa.string()),
+        ("full_name", pa.string()),
+        ("cricinfo_id", pa.string()),
+        ("country", pa.string()),
+        ("batting_style_raw", pa.string()),
+        ("bowling_style_raw", pa.string()),
+        ("batting_hand", pa.string()),
+        ("bowling_arm", pa.string()),
+        ("pace_group", pa.string()),
+        ("bowling_family", pa.string()),
+        ("arm_pace_key", pa.string()),
+        ("playing_role", pa.string()),
+        ("source", pa.string()),
+        ("matched", pa.bool_()),
+    ]
+)

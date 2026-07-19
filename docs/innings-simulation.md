@@ -3,21 +3,32 @@
 Monte Carlo innings on hierarchical Bayes priors — the next step after
 `cric-forecast-vs-attack`.
 
+## Input conventions
+
+- **Playing XI / `--batters`**: list order **is batting order** (1st = opener,
+  11th = last man). Fantasy / Dream XI paths set `batting_order = i + 1` from
+  this list.
+- **`--bowlers`**: list order **is bowling priority** (not XI batting order).
+  Quotas and phase preference follow this order (e.g. IND
+  Bumrah → Prasidh → Gurnoor → Axar → Sundar).
+
 ## What it models
 
 - **Batting XI**: pass the full **11** — lower-order batters face fewer balls
   (low expected runs) but still contribute to the team total
-- **Bowling attack**: typically **5** bowlers × max 4 overs
+- **Bowling attack**: **5** bowlers × 4 overs, or **6** with default
+  `4-4-4-4-2-2` (alt `4-4-4-3-3-2`)
 - **Partnerships**: striker + non-striker familiarity from co-batter graph
   mildly lifts SR / damps dismissals; each over records the pair at the crease
 - **Per-over scoreboard**: expected runs + wickets by over (1–20)
 - **Phase weights**: PP / middle / death run totals with weights
   (0.28 / 0.40 / 0.32) → `phase_weighted_score`
 - **Wicket load**: early collapses tilt rates down (fewer runs, more risk)
+- **Spell / form overdispersion**: mean-preserving Gamma shocks on bowler
+  dismissal hazard and batter SR fatten multi-wicket hauls and big knocks
 - **Phases**: powerplay (0–35 legal balls), middle (36–95), death (96–119)
-- **Bowling allocation**: up to 4 overs each; **phase scores from train**
-  (wicket rate / SR conceded). Death specialists (e.g. Bumrah) are preferred
-  at the death; PP specialists at the powerplay — not list-order heuristics.
+- **Bowling allocation** (see below): cricket-aware quotas + pace/spin rules,
+  with train **phase scores** (`wicket_rate / (sr + c)`) breaking ties
 - **Strike rotation**: odd runs + end of over
 - **Dismissals**: bowler-attributable hazard from HB matchups; each wicket
   credits the bowling bowler (plus runs conceded / balls / economy)
@@ -28,11 +39,29 @@ Monte Carlo innings on hierarchical Bayes priors — the next step after
   **win-confidence** `P(chase wins | state)`. Low confidence + high RRR
   nudges SR toward the required rate; innings stops at target.
 - **Output**: team run distribution + per-batter expected runs/balls +
-  per-bowler expected wickets / economy; chase runs also report
-  `p_chase_win` and mean win-confidence
+  per-bowler expected wickets / economy; plus MC tail probs
+  `p_runs_ge{30,50,100}` / `p_wickets_ge{3,4,5}` for fantasy expected
+  milestone / haul points; chase runs also report `p_chase_win` and mean
+  win-confidence
 
 Not yet: extras/wides as separate events, run-outs, explicit field-restriction
 state machine, deep embeddings, XI optimizer.
+
+## Bowling allocation (T20)
+
+`configure_attack` attaches `pace_group` from player attributes, phase scores
+from train, and over quotas; `build_over_schedule` then assigns overs:
+
+| Rule | Behaviour |
+|------|-----------|
+| Quotas | 5 → `4×5`; 6 → `4-4-4-4-2-2` (default) or `4-4-4-3-3-2` |
+| Priority | Attack list order (bowler #1 preferred when scores tie) |
+| Death (16–19) | **Pace only** (unknown treated as pace); prefer high death phase score |
+| Powerplay | Pace vs top order; if #1 is spin, **only over 0** may be that spinner |
+| Middle | Top-3-ranked spinners bowl out before death; rebalance if needed |
+
+API: `attach_pace_groups` → `assign_over_quotas` / `configure_attack` →
+`build_over_schedule`.
 
 ## Weather (daily)
 

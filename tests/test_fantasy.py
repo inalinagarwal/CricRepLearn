@@ -22,12 +22,17 @@ from cric_rep_learn.simulation.run_sampler import sample_runs
 
 
 def test_batting_and_bowling_points() -> None:
+    from cric_rep_learn.fantasy.scoring import DEFAULT_WEIGHTS, save_scoring_weights
+
+    trial = Path("/tmp/fantasy_default_weights_test.json")
+    save_scoring_weights(dict(DEFAULT_WEIGHTS), trial)
+    load_scoring_weights(trial)
     bat = batting_points({"expected_runs": 45.0, "expected_balls": 30.0})
     assert bat["batting_points"] > 45  # milestone 30
     bowl = bowling_points(
         {"expected_wickets": 2.2, "expected_overs": 4.0, "expected_economy": 6.5}
     )
-    assert bowl["bowling_points"] > 2.2 * 30
+    assert bowl["bowling_points"] > 2.2 * DEFAULT_WEIGHTS["BOWL_WICKET"]
 
 
 def test_boundary_fantasy_components() -> None:
@@ -40,6 +45,66 @@ def test_boundary_fantasy_components() -> None:
         }
     )
     assert bat["boundary_component"] == pytest.approx(4.0 * 1.0 + 2.0 * 2.0)
+
+
+def test_expected_haul_from_mc_tail_probs() -> None:
+    """Haul bonuses are nonlinear — use MC P(W>=k), not threshold on E[W]."""
+    from cric_rep_learn.fantasy.scoring import _expected_tier_points
+
+    mean_only = bowling_points(
+        {"expected_wickets": 1.4, "expected_overs": 4.0, "expected_economy": 7.5}
+    )
+    assert mean_only["haul_component"] == 0.0
+
+    with_tails = bowling_points(
+        {
+            "expected_wickets": 1.4,
+            "expected_overs": 4.0,
+            "expected_economy": 7.5,
+            "p_wickets_ge3": 0.20,
+            "p_wickets_ge4": 0.06,
+            "p_wickets_ge5": 0.01,
+        }
+    )
+    expected = _expected_tier_points(
+        p_ge_low=0.20,
+        p_ge_mid=0.06,
+        p_ge_high=0.01,
+        pts_low=4.0,
+        pts_mid=8.0,
+        pts_high=16.0,
+    )
+    assert with_tails["haul_component"] == pytest.approx(expected)
+    assert with_tails["haul_component"] > 0.0
+    assert with_tails["bowling_points"] > mean_only["bowling_points"]
+
+
+def test_expected_milestone_from_mc_tail_probs() -> None:
+    """Milestone bonuses use MC P(R>=k) when present."""
+    from cric_rep_learn.fantasy.scoring import _expected_tier_points
+
+    mean_only = batting_points({"expected_runs": 22.0, "expected_balls": 18.0})
+    assert mean_only["milestone_component"] == 0.0
+
+    with_tails = batting_points(
+        {
+            "expected_runs": 22.0,
+            "expected_balls": 18.0,
+            "p_runs_ge30": 0.35,
+            "p_runs_ge50": 0.10,
+            "p_runs_ge100": 0.01,
+        }
+    )
+    expected = _expected_tier_points(
+        p_ge_low=0.35,
+        p_ge_mid=0.10,
+        p_ge_high=0.01,
+        pts_low=4.0,
+        pts_mid=8.0,
+        pts_high=16.0,
+    )
+    assert with_tails["milestone_component"] == pytest.approx(expected)
+    assert with_tails["batting_points"] > mean_only["batting_points"]
 
 
 def test_role_mapper() -> None:
@@ -366,6 +431,25 @@ def test_calibration_tune_smoke(tmp_path: Path) -> None:
     assert _spearman(np.array([1.0, 2.0, 3.0]), np.array([1.0, 2.0, 3.5])) > 0.9
 
 
+def test_box_scores_preserve_allrounder_bowling() -> None:
+    """Batting appearance must not wipe overs/wickets for the same player."""
+    from pathlib import Path
+
+    from cric_rep_learn.fantasy.calibration import build_match_box_scores
+
+    canonical = Path("artifacts/canonical")
+    if not (canonical / "deliveries.parquet").exists():
+        pytest.skip("canonical artifacts not present")
+    table = build_match_box_scores(canonical, splits=("validation",))
+    frame = table.to_pandas()
+    # Players who both faced balls and bowled legal deliveries.
+    both = frame[(frame["balls"] > 0) & (frame["overs"] > 0)]
+    assert len(both) >= 1
+    assert float(both["wickets"].sum()) >= 0.0
+    # Spot-check: at least one all-rounder with a real bowling spell.
+    assert float(both["overs"].max()) >= 1.0
+
+
 def test_reconstruct_holdout_smoke() -> None:
     from pathlib import Path
 
@@ -375,10 +459,91 @@ def test_reconstruct_holdout_smoke() -> None:
     if not (canonical / "deliveries.parquet").exists():
         pytest.skip("canonical artifacts not present")
     setups = reconstruct_holdout_matches(
-        canonical, splits=("validation",), max_matches=3, seed=0
+        canonical,
+        splits=("validation",),
+        max_matches=3,
+        seed=0,
+        opportunity="scheduled",
     )
     assert len(setups) >= 1
     s0 = setups[0]
     assert len(s0.first_lineup) >= 2
-    assert len(s0.first_attack) >= 1
+    assert len(s0.first_attack) == 5
     assert s0.first_team and s0.chase_team
+    assert sum(b.max_overs for b in s0.first_attack) == 20
+    setups_actual = reconstruct_holdout_matches(
+        canonical,
+        splits=("validation",),
+        max_matches=3,
+        seed=0,
+        opportunity="actual",
+    )
+    assert len(setups_actual[0].first_attack) >= 1
+    assert sum(b.max_overs for b in setups_actual[0].first_attack) >= 1
+
+
+def test_innings_expected_runs_reads_nested_team() -> None:
+    """Chase targets must use team.expected_runs from simulate_innings."""
+    from cric_rep_learn.fantasy.holdout_mc import _innings_expected_runs
+
+    nested = {"team": {"expected_runs": 148.5}, "batters": [], "bowlers": []}
+    assert _innings_expected_runs(nested) == pytest.approx(148.5)
+    # Legacy/slim payload with top-level key still works.
+    assert _innings_expected_runs({"expected_runs": 120.0}) == pytest.approx(120.0)
+    # Missing key must not silently become a 1-run chase target via `or 0`.
+    assert _innings_expected_runs({"batters": [], "bowlers": []}) == 0.0
+    assert _innings_expected_runs(nested) + 1.0 == pytest.approx(149.5)
+
+
+def test_holdout_mc_chase_contributes_both_innings(tmp_path: Path) -> None:
+    """
+    Holdout MC must not collapse chase to target≈1 (half match scale).
+
+    Smoke on one reconstructed match: both teams bat and ~40 overs are scheduled.
+    """
+    from cric_rep_learn.fantasy.holdout_mc import (
+        predict_holdout_via_mc,
+        reconstruct_holdout_matches,
+    )
+
+    canonical = Path("artifacts/canonical")
+    if not (canonical / "deliveries.parquet").exists():
+        pytest.skip("canonical artifacts not present")
+    attrs = Path("artifacts/player-attributes/player_attributes.parquet")
+    effects = Path("artifacts/player-effects/player_effects.parquet")
+    matchups = Path("artifacts/player-effects/batter_bowler_matchups.parquet")
+    if not attrs.exists() or not effects.exists() or not matchups.exists():
+        pytest.skip("player-effect artifacts not present")
+
+    setups = reconstruct_holdout_matches(
+        canonical,
+        splits=("validation",),
+        max_matches=1,
+        seed=7,
+        opportunity="scheduled",
+    )
+    assert setups
+    pred = predict_holdout_via_mc(
+        setups,
+        canonical_dir=canonical,
+        attributes_path=attrs,
+        effects_path=effects,
+        matchups_path=matchups,
+        chase_impacts_path=Path("artifacts/baselines/chase_impacts.json"),
+        co_batters_path=Path("artifacts/co-batters/co_batters.parquet"),
+        n_sims=8,
+        seed=7,
+    )
+    assert len(pred) >= 20
+    totals = pred.groupby("match_id").agg(
+        runs=("expected_runs", "sum"),
+        overs=("expected_overs", "sum"),
+        balls=("expected_balls", "sum"),
+    )
+    row = totals.iloc[0]
+    # Full match: ~2×20 overs and batting from both XIs (not one innings only).
+    assert float(row["overs"]) >= 30.0
+    assert float(row["runs"]) >= 180.0
+    assert float(row["balls"]) >= 180.0
+    by_team = pred.groupby("team")["expected_runs"].sum()
+    assert (by_team > 40.0).all()

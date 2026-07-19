@@ -14,7 +14,7 @@ from cric_rep_learn.data.player_attributes import load_attributes_index
 from cric_rep_learn.players.card import resolve_player
 from cric_rep_learn.simulation.attack import (
     BowlerSpell,
-    attach_phase_profiles,
+    configure_attack,
     load_bowler_phase_profiles,
 )
 from cric_rep_learn.simulation.chase import load_chase_impacts
@@ -32,6 +32,7 @@ def _resolve_lineup(
     aliases,
     attributes: dict[str, dict[str, Any]],
 ) -> list[dict[str, str]]:
+    """Resolve names in list order = batting order (1st = opener)."""
     lineup = []
     for query in names:
         resolved = resolve_player(query, aliases, attributes=attributes)
@@ -53,8 +54,8 @@ def _resolve_attack(
     attributes: dict[str, dict[str, Any]],
     *,
     canonical_dir: Path,
-    max_overs: int = 4,
 ) -> list[BowlerSpell]:
+    """Resolve bowlers in list order = bowling priority; set pace + quotas."""
     attack: list[BowlerSpell] = []
     for query in names:
         resolved = resolve_player(query, aliases, attributes=attributes)
@@ -62,21 +63,36 @@ def _resolve_attack(
             BowlerSpell(
                 player_id=resolved["player_id"],
                 player_name=resolved["player_name"],
-                max_overs=max_overs,
             )
         )
     profiles = load_bowler_phase_profiles(
         canonical_dir, [b.player_id for b in attack]
     )
-    return attach_phase_profiles(attack, profiles)
+    return configure_attack(attack, profiles=profiles, attributes=attributes)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--first-batters", required=True, help="Full XI batting first (11)")
-    parser.add_argument("--first-bowlers", required=True, help="Bowling attack in first innings (5)")
-    parser.add_argument("--chase-batters", required=True, help="Full XI chasing (11)")
-    parser.add_argument("--chase-bowlers", required=True, help="Bowling attack in chase (5)")
+    parser.add_argument(
+        "--first-batters",
+        required=True,
+        help="Full XI batting first in batting order (11; 1st = opener)",
+    )
+    parser.add_argument(
+        "--first-bowlers",
+        required=True,
+        help="Bowling attack in first innings (5–6; list order = priority)",
+    )
+    parser.add_argument(
+        "--chase-batters",
+        required=True,
+        help="Full XI chasing in batting order (11; 1st = opener)",
+    )
+    parser.add_argument(
+        "--chase-bowlers",
+        required=True,
+        help="Bowling attack in chase (5–6; list order = priority)",
+    )
     parser.add_argument("--venue", default=None)
     parser.add_argument("--date", default=None)
     parser.add_argument("--sims", type=int, default=300)
@@ -135,9 +151,9 @@ def main() -> None:
                 f"note: {label} has {len(lineup)} batters; prefer full XI (11)",
                 file=sys.stderr,
             )
-        if len(attack) != 5:
+        if len(attack) not in {5, 6}:
             print(
-                f"note: {label} has {len(attack)} bowlers; typical attack is 5",
+                f"note: {label} has {len(attack)} bowlers; typical attack is 5 or 6",
                 file=sys.stderr,
             )
         if sum(b.max_overs for b in attack) < 20:

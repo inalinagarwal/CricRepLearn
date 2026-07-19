@@ -20,7 +20,7 @@ from cric_rep_learn.fantasy.venue_tilt import venue_scoring_profile
 from cric_rep_learn.players.card import resolve_player
 from cric_rep_learn.simulation.attack import (
     BowlerSpell,
-    attach_phase_profiles,
+    configure_attack,
     load_bowler_phase_profiles,
 )
 from cric_rep_learn.simulation.chase import load_chase_impacts
@@ -54,6 +54,7 @@ def _parse_roles(raw: str) -> dict[str, str]:
 
 
 def _resolve_lineup(names, aliases, attributes):
+    """Resolve names in list order = batting order (1st = opener)."""
     lineup = []
     for query in names:
         resolved = resolve_player(query, aliases, attributes=attributes)
@@ -70,6 +71,7 @@ def _resolve_lineup(names, aliases, attributes):
 
 
 def _resolve_attack(names, aliases, attributes, *, canonical_dir: Path):
+    """Resolve bowlers in list order = bowling priority; set pace + quotas."""
     attack: list[BowlerSpell] = []
     for query in names:
         resolved = resolve_player(query, aliases, attributes=attributes)
@@ -77,13 +79,12 @@ def _resolve_attack(names, aliases, attributes, *, canonical_dir: Path):
             BowlerSpell(
                 player_id=resolved["player_id"],
                 player_name=resolved["player_name"],
-                max_overs=4,
             )
         )
     profiles = load_bowler_phase_profiles(
         canonical_dir, [b.player_id for b in attack]
     )
-    return attach_phase_profiles(attack, profiles)
+    return configure_attack(attack, profiles=profiles, attributes=attributes)
 
 
 def _fmt_match(label: str, match: dict[str, Any]) -> str:
@@ -160,10 +161,26 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--team-a-name", default="IND")
     parser.add_argument("--team-b-name", default="ENG")
-    parser.add_argument("--team-a-batters", required=True, help="Full XI team A (11)")
-    parser.add_argument("--team-b-batters", required=True, help="Full XI team B (11)")
-    parser.add_argument("--team-a-bowlers", required=True, help="5 bowlers from team A")
-    parser.add_argument("--team-b-bowlers", required=True, help="5 bowlers from team B")
+    parser.add_argument(
+        "--team-a-batters",
+        required=True,
+        help="Full XI team A in batting order (11; 1st = opener)",
+    )
+    parser.add_argument(
+        "--team-b-batters",
+        required=True,
+        help="Full XI team B in batting order (11; 1st = opener)",
+    )
+    parser.add_argument(
+        "--team-a-bowlers",
+        required=True,
+        help="5–6 bowlers from team A (list order = bowling priority)",
+    )
+    parser.add_argument(
+        "--team-b-bowlers",
+        required=True,
+        help="5–6 bowlers from team B (list order = bowling priority)",
+    )
     parser.add_argument(
         "--roles",
         default=None,

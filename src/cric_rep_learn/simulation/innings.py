@@ -19,10 +19,28 @@ from cric_rep_learn.simulation.priors import InningsRateModel
 from cric_rep_learn.simulation.run_sampler import sample_runs
 from cric_rep_learn.simulation.state import BatterInnings, InningsState
 
+# Mean-preserving Gamma overdispersion (E[mult]=1, Var=phi). Fattens haul /
+# big-score tails without shifting ball-level mean rates.
+DISMISSAL_SPELL_PHI = 0.90
+BATTER_SR_PHI = 0.35
+
 
 def _sample_runs(rng: np.random.Generator, expected_sr: float) -> int:
     """Backward-compatible wrapper around train-calibrated sampler."""
     return sample_runs(rng, expected_sr)
+
+
+def _gamma_multipliers(
+    rng: np.random.Generator,
+    keys: list[str],
+    *,
+    phi: float,
+) -> dict[str, float]:
+    """Draw mean-1 Gamma multipliers; phi<=0 → all ones."""
+    if phi <= 1e-12 or not keys:
+        return {k: 1.0 for k in keys}
+    shape = 1.0 / phi
+    return {k: float(rng.gamma(shape, scale=phi)) for k in keys}
 
 
 def _new_state(lineup: list[dict[str, str]]) -> InningsState:
@@ -72,6 +90,13 @@ def simulate_one_innings(
     rate_cache: dict[tuple[str, str, str], dict[str, Any]] = {}
     confidences: list[float] = []
     partnership_index = partnership_index or {}
+    # Per-innings spell / form shocks → multi-wicket hauls and big knocks.
+    dismiss_mult = _gamma_multipliers(
+        rng, [b.player_id for b in attack], phi=DISMISSAL_SPELL_PHI
+    )
+    sr_mult = _gamma_multipliers(
+        rng, [row["player_id"] for row in lineup], phi=BATTER_SR_PHI
+    )
     bowler_figures: dict[str, dict[str, Any]] = {
         b.player_id: {
             "player_id": b.player_id,
@@ -125,10 +150,16 @@ def simulate_one_innings(
             non_striker.player_id,
             index=partnership_index,
         )
-        ball_rates["expected_sr"] = float(ball_rates["expected_sr"]) * tilt["sr_mult"]
-        ball_rates["dismissal_rate"] = float(ball_rates["dismissal_rate"]) * tilt[
-            "dismiss_mult"
-        ]
+        ball_rates["expected_sr"] = (
+            float(ball_rates["expected_sr"])
+            * tilt["sr_mult"]
+            * sr_mult.get(striker.player_id, 1.0)
+        )
+        ball_rates["dismissal_rate"] = (
+            float(ball_rates["dismissal_rate"])
+            * tilt["dismiss_mult"]
+            * dismiss_mult.get(bowler_id, 1.0)
+        )
 
         # Wicket load: early collapses suppress SR and raise hazard.
         if state.wickets >= 3 and state.legal_balls < 60:
@@ -155,6 +186,13 @@ def simulate_one_innings(
             ball_rates["dismissal_rate"] = pressed["dismissal_rate"]
             if pressed.get("win_confidence") is not None:
                 confidences.append(float(pressed["win_confidence"]))
+
+        ball_rates["dismissal_rate"] = float(
+            min(max(float(ball_rates["dismissal_rate"]), 1e-4), 0.40)
+        )
+        ball_rates["expected_sr"] = float(
+            min(max(float(ball_rates["expected_sr"]), 0.05), 3.5)
+        )
 
         striker.balls += 1.0
         figures["balls"] += 1.0
@@ -319,6 +357,11 @@ def simulate_innings(
                 "expected_fours": float(bf.mean()),
                 "expected_sixes": float(bs.mean()),
                 "p_batted": float(np.mean(bb > 0)),
+                "p_runs_ge30": float(np.mean(br >= 30.0)),
+                "p_runs_ge50": float(np.mean(br >= 50.0)),
+                "p_runs_ge100": float(np.mean(br >= 100.0)),
+                "p_fours_ge4": float(np.mean(bf >= 4.0)),
+                "p_sixes_ge2": float(np.mean(bs >= 2.0)),
             }
         )
 
@@ -338,6 +381,10 @@ def simulate_innings(
                 "wickets_p10": float(np.quantile(bw, 0.10)),
                 "wickets_p50": float(np.quantile(bw, 0.50)),
                 "wickets_p90": float(np.quantile(bw, 0.90)),
+                "p_wickets_ge2": float(np.mean(bw >= 2.0)),
+                "p_wickets_ge3": float(np.mean(bw >= 3.0)),
+                "p_wickets_ge4": float(np.mean(bw >= 4.0)),
+                "p_wickets_ge5": float(np.mean(bw >= 5.0)),
                 "expected_runs_conceded": float(bruns.mean()),
                 "expected_balls": float(bb.mean()),
                 "expected_overs": float(overs.mean()),
@@ -375,6 +422,8 @@ def simulate_innings(
     method = (
         "Monte Carlo T20 innings on HB matchup priors + phase shrink + "
         "L/R handedness + partnership familiarity + wicket-load tilt; "
+        "mean-preserving spell dismissal / batter SR overdispersion for "
+        "haul and big-score tails; "
         "per-over runs/wickets; PP/middle/death weighted score; "
         "full XI batting; max 4 overs/bowler"
     )

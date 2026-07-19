@@ -13,7 +13,8 @@ import pandas as pd
 from cric_rep_learn.data.player_attributes import load_attributes_index
 from cric_rep_learn.simulation.attack import (
     BowlerSpell,
-    attach_phase_profiles,
+    assign_over_quotas_from_actual,
+    configure_attack,
     load_bowler_phase_profiles,
 )
 from cric_rep_learn.simulation.chase import load_chase_impacts
@@ -47,12 +48,25 @@ def reconstruct_holdout_matches(
     max_matches: int = 100,
     seed: int = 7,
     min_batters: int = 8,
-    min_bowlers: int = 4,
+    min_bowlers: int = 5,
+    attributes: dict[str, dict[str, Any]] | None = None,
+    opportunity: str = "scheduled",
 ) -> list[HoldoutMatchSetup]:
     """
-    Rebuild XI batting order (first appearance) and top-5 bowling attacks
-    from faced balls / legal overs on holdout matches.
+    Rebuild XI batting order (first appearance) and bowling attacks from
+    faced balls / legal overs on holdout matches.
+
+    ``opportunity``:
+      - ``scheduled`` (default): top-5 by legal balls + cricket-aware list-order
+        quotas (production Dream XI path).
+      - ``actual``: include all bowlers who bowled; set ``max_overs`` from
+        observed overs (capped at 4, padded/trimmed). Phase/death rules still
+        schedule overs within those quotas.
+
+    Require ≥5 bowlers so quotas can cover 20 overs (max 4 each).
     """
+    if opportunity not in {"actual", "scheduled"}:
+        raise ValueError("opportunity must be 'actual' or 'scheduled'")
     deliveries = _escape(canonical_dir / "deliveries.parquet")
     split = _escape(canonical_dir / "split_manifest.parquet")
     matches = _escape(canonical_dir / "matches.parquet")
@@ -158,7 +172,9 @@ def reconstruct_holdout_matches(
     all_bowler_ids: set[str] = set()
     for mid in complete:
         for inn in (1, 2):
-            for row in bowl_by.get((mid, inn), [])[:5]:
+            rows = bowl_by.get((mid, inn), [])
+            take = rows if opportunity == "actual" else rows[:5]
+            for row in take:
                 all_bowler_ids.add(str(row["player_id"]))
     profiles = load_bowler_phase_profiles(canonical_dir, sorted(all_bowler_ids))
 
@@ -199,15 +215,32 @@ def reconstruct_holdout_matches(
         return out
 
     def _attack(rows: list[dict[str, Any]]) -> list[BowlerSpell]:
+        if opportunity == "scheduled":
+            attack = [
+                BowlerSpell(
+                    player_id=str(row["player_id"]),
+                    player_name=str(row["player_name"]),
+                )
+                for row in rows[:5]
+            ]
+            return configure_attack(
+                attack, profiles=profiles, attributes=attributes, assign_quotas=True
+            )
+        # Actual opportunity: all bowlers who bowled, quotas from overs.
         attack = [
             BowlerSpell(
                 player_id=str(row["player_id"]),
                 player_name=str(row["player_name"]),
-                max_overs=4,
             )
-            for row in rows[:5]
+            for row in rows
         ]
-        return attach_phase_profiles(attack, profiles)
+        actual = {
+            str(row["player_id"]): float(row["legal_balls"]) / 6.0 for row in rows
+        }
+        assign_over_quotas_from_actual(attack, actual)
+        return configure_attack(
+            attack, profiles=profiles, attributes=attributes, assign_quotas=False
+        )
 
     setups: list[HoldoutMatchSetup] = []
     for mid in complete:
@@ -260,6 +293,21 @@ def _attach_hands(
             }
         )
     return out
+
+
+def _innings_expected_runs(innings: dict[str, Any]) -> float:
+    """
+    Read team expected runs from ``simulate_innings`` output.
+
+    Summaries nest totals under ``team``; a top-level ``expected_runs`` key is
+    accepted only as a fallback for older/slimmed payloads.
+    """
+    team = innings.get("team")
+    if isinstance(team, dict) and team.get("expected_runs") is not None:
+        return float(team["expected_runs"])
+    if innings.get("expected_runs") is not None:
+        return float(innings["expected_runs"])
+    return 0.0
 
 
 def _merge_innings_to_rows(
@@ -317,9 +365,15 @@ def _merge_innings_to_rows(
                 "expected_balls": float(batting.get("expected_balls") or 0.0),
                 "expected_fours": float(batting.get("expected_fours") or 0.0),
                 "expected_sixes": float(batting.get("expected_sixes") or 0.0),
+                "p_runs_ge30": float(batting.get("p_runs_ge30") or 0.0),
+                "p_runs_ge50": float(batting.get("p_runs_ge50") or 0.0),
+                "p_runs_ge100": float(batting.get("p_runs_ge100") or 0.0),
                 "expected_wickets": float(bowling.get("expected_wickets") or 0.0),
                 "expected_overs": overs,
                 "expected_economy": econ,
+                "p_wickets_ge3": float(bowling.get("p_wickets_ge3") or 0.0),
+                "p_wickets_ge4": float(bowling.get("p_wickets_ge4") or 0.0),
+                "p_wickets_ge5": float(bowling.get("p_wickets_ge5") or 0.0),
             }
         )
     return rows
@@ -372,6 +426,9 @@ def predict_holdout_via_mc(
     for i, setup in enumerate(setups):
         first_lineup = _attach_hands(setup.first_lineup, attributes)
         chase_lineup = _attach_hands(setup.chase_lineup, attributes)
+        # Preserve holdout quotas (actual or scheduled); only refresh pace groups.
+        configure_attack(setup.first_attack, attributes=attributes, assign_quotas=False)
+        configure_attack(setup.chase_attack, attributes=attributes, assign_quotas=False)
         first = simulate_innings(
             lineup=first_lineup,
             attack=setup.first_attack,
@@ -380,7 +437,10 @@ def predict_holdout_via_mc(
             seed=seed + i * 17,
             partnership_index=partnership_index,
         )
-        target = float(first.get("expected_runs") or 0.0) + 1.0
+        # Must read nested team.expected_runs — top-level key is absent, so the
+        # prior ``first.get("expected_runs") or 0`` collapsed every chase to
+        # target=1 and wiped chase batting + bowling opportunity (~½ scale).
+        target = _innings_expected_runs(first) + 1.0
         chase = simulate_innings(
             lineup=chase_lineup,
             attack=setup.chase_attack,

@@ -14,7 +14,7 @@ from cric_rep_learn.data.player_attributes import load_attributes_index
 from cric_rep_learn.players.card import resolve_player
 from cric_rep_learn.simulation.attack import (
     BowlerSpell,
-    attach_phase_profiles,
+    configure_attack,
     load_bowler_phase_profiles,
 )
 from cric_rep_learn.simulation.chase import load_chase_impacts
@@ -32,6 +32,7 @@ def _resolve_lineup(
     aliases,
     attributes: dict[str, dict[str, Any]],
 ) -> list[dict[str, str]]:
+    """Resolve names in list order = batting order (1st = opener)."""
     lineup = []
     for query in names:
         resolved = resolve_player(query, aliases, attributes=attributes)
@@ -53,8 +54,8 @@ def _resolve_attack(
     attributes: dict[str, dict[str, Any]],
     *,
     canonical_dir: Path,
-    max_overs: int = 4,
 ) -> list[BowlerSpell]:
+    """Resolve bowlers in list order = bowling priority; set pace + quotas."""
     attack: list[BowlerSpell] = []
     for query in names:
         resolved = resolve_player(query, aliases, attributes=attributes)
@@ -62,13 +63,12 @@ def _resolve_attack(
             BowlerSpell(
                 player_id=resolved["player_id"],
                 player_name=resolved["player_name"],
-                max_overs=max_overs,
             )
         )
     profiles = load_bowler_phase_profiles(
         canonical_dir, [b.player_id for b in attack]
     )
-    return attach_phase_profiles(attack, profiles)
+    return configure_attack(attack, profiles=profiles, attributes=attributes)
 
 
 def main() -> None:
@@ -77,15 +77,17 @@ def main() -> None:
         "--batters",
         required=True,
         help=(
-            "Full batting order (typically 11). Lower-order players contribute "
-            "fewer expected runs but still add to the team total."
+            "Full XI in batting order (typically 11; 1st = opener). "
+            "Lower-order players contribute fewer expected runs but still "
+            "add to the team total."
         ),
     )
     parser.add_argument(
         "--bowlers",
         required=True,
         help=(
-            "Bowling attack (typically 5 × max 4 overs = 20). "
+            "Bowling attack in priority order (5 → 4 overs each; "
+            "6 → 4-4-4-4-2-2). "
             'e.g. "JJ Bumrah,B Kumar,R Ashwin,YS Chahal,HH Pandya"'
         ),
     )
@@ -164,10 +166,10 @@ def main() -> None:
             "so lower-order contributions enter the team total",
             file=sys.stderr,
         )
-    if len(attack) != 5:
+    if len(attack) not in {5, 6}:
         print(
             f"note: {len(attack)} bowlers supplied; typical T20 attack is 5 "
-            "(4 overs each)",
+            "(4 each) or 6 (4-4-4-4-2-2)",
             file=sys.stderr,
         )
     if sum(b.max_overs for b in attack) < 20:
@@ -222,6 +224,7 @@ def main() -> None:
             "player_id": b.player_id,
             "player_name": b.player_name,
             "max_overs": b.max_overs,
+            "pace_group": b.pace_group,
             "phase_scores": b.phase_scores,
             "phase_evidence": {
                 phase: {

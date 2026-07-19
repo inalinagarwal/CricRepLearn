@@ -145,8 +145,11 @@ def sample_runs(
     probs = probs / probs.sum()
     draw = int(rng.choice(OUTCOMES, p=probs))
     mean = float(np.dot(probs, OUTCOMES))
-    if mean < sr - 0.15 and draw in (0, 1) and rng.random() < min(0.45, sr - mean):
-        draw = 4 if rng.random() < 0.55 else 6
+    # Mild boundary fattening: when SR is above the bucket mean, convert
+    # singles/dots into 4/6 slightly more aggressively (fantasy boundary tails).
+    boundary_gap = sr - mean
+    if boundary_gap > 0.12 and draw in (0, 1) and rng.random() < min(0.50, 0.55 * boundary_gap):
+        draw = 4 if rng.random() < 0.52 else 6
     elif mean > sr + 0.25 and draw in (4, 6) and rng.random() < min(0.45, mean - sr):
         draw = 1 if rng.random() < 0.7 else 0
     return draw

@@ -67,6 +67,46 @@ def W(key: str) -> float:
     return float(_WEIGHTS.get(key, DEFAULT_WEIGHTS[key]))
 
 
+def _prob_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed != parsed:  # NaN
+        return None
+    return parsed
+
+
+def _expected_tier_points(
+    *,
+    p_ge_low: float,
+    p_ge_mid: float,
+    p_ge_high: float,
+    pts_low: float,
+    pts_mid: float,
+    pts_high: float,
+) -> float:
+    """
+    Expected points for mutually exclusive escalating tiers.
+
+    Tier pays ``pts_low`` on [low, mid), ``pts_mid`` on [mid, high),
+    ``pts_high`` on [high, ∞). With survival probs p_ge_*:
+
+        E = pts_low*(p_low-p_mid) + pts_mid*(p_mid-p_high) + pts_high*p_high
+          = (pts_low)*p_low + (pts_mid-pts_low)*p_mid + (pts_high-pts_mid)*p_high
+    """
+    p_low = float(min(max(p_ge_low, 0.0), 1.0))
+    p_mid = float(min(max(p_ge_mid, 0.0), p_low))
+    p_high = float(min(max(p_ge_high, 0.0), p_mid))
+    return float(
+        pts_low * p_low
+        + (pts_mid - pts_low) * p_mid
+        + (pts_high - pts_mid) * p_high
+    )
+
+
 # Back-compat module-level names used elsewhere.
 def _refresh_exports() -> None:
     global BAT_RUN, BAT_MILESTONE_30, BAT_MILESTONE_50, BAT_MILESTONE_100
@@ -132,7 +172,20 @@ def batting_points(batter: dict[str, Any]) -> dict[str, float]:
     boundary = fours * W("BAT_FOUR") + sixes * W("BAT_SIX")
     pts += boundary
     milestone = 0.0
-    if runs >= 100:
+    p30 = _prob_or_none(batter.get("p_runs_ge30"))
+    p50 = _prob_or_none(batter.get("p_runs_ge50"))
+    p100 = _prob_or_none(batter.get("p_runs_ge100"))
+    if p30 is not None or p50 is not None or p100 is not None:
+        # MC survival probs → expected milestone (nonlinear in runs).
+        milestone = _expected_tier_points(
+            p_ge_low=float(p30 or 0.0),
+            p_ge_mid=float(p50 or 0.0),
+            p_ge_high=float(p100 or 0.0),
+            pts_low=W("BAT_MILESTONE_30"),
+            pts_mid=W("BAT_MILESTONE_50"),
+            pts_high=W("BAT_MILESTONE_100"),
+        )
+    elif runs >= 100:
         milestone = W("BAT_MILESTONE_100")
     elif runs >= 50:
         milestone = W("BAT_MILESTONE_50")
@@ -174,7 +227,20 @@ def bowling_points(bowler: dict[str, Any]) -> dict[str, float]:
         econ = bowler.get("economy")
     pts = wickets * W("BOWL_WICKET")
     haul = 0.0
-    if wickets >= 5:
+    p3 = _prob_or_none(bowler.get("p_wickets_ge3"))
+    p4 = _prob_or_none(bowler.get("p_wickets_ge4"))
+    p5 = _prob_or_none(bowler.get("p_wickets_ge5"))
+    if p3 is not None or p4 is not None or p5 is not None:
+        # MC survival probs → expected haul bonus (nonlinear in wickets).
+        haul = _expected_tier_points(
+            p_ge_low=float(p3 or 0.0),
+            p_ge_mid=float(p4 or 0.0),
+            p_ge_high=float(p5 or 0.0),
+            pts_low=W("BOWL_HAUL_3"),
+            pts_mid=W("BOWL_HAUL_4"),
+            pts_high=W("BOWL_HAUL_5"),
+        )
+    elif wickets >= 5:
         haul = W("BOWL_HAUL_5")
     elif wickets >= 4:
         haul = W("BOWL_HAUL_4")
@@ -238,6 +304,9 @@ def merge_player_points(
             else batting.get("sixes")
             or 0.0
         ),
+        "p_runs_ge30": batting.get("p_runs_ge30"),
+        "p_runs_ge50": batting.get("p_runs_ge50"),
+        "p_runs_ge100": batting.get("p_runs_ge100"),
         "expected_wickets": float(
             bowling.get("expected_wickets")
             if bowling.get("expected_wickets") is not None
@@ -253,6 +322,9 @@ def merge_player_points(
         "expected_economy": bowling.get("expected_economy")
         if bowling.get("expected_economy") is not None
         else bowling.get("economy"),
+        "p_wickets_ge3": bowling.get("p_wickets_ge3"),
+        "p_wickets_ge4": bowling.get("p_wickets_ge4"),
+        "p_wickets_ge5": bowling.get("p_wickets_ge5"),
         **bat,
         **bowl,
         "fantasy_points": float(total),
@@ -278,8 +350,14 @@ def average_player_pools(
             "expected_balls",
             "expected_fours",
             "expected_sixes",
+            "p_runs_ge30",
+            "p_runs_ge50",
+            "p_runs_ge100",
             "expected_wickets",
             "expected_overs",
+            "p_wickets_ge3",
+            "p_wickets_ge4",
+            "p_wickets_ge5",
             "batting_points",
             "bowling_points",
             "fantasy_points",

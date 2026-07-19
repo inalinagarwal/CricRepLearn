@@ -24,6 +24,7 @@ from cric_rep_learn.fantasy.scoring import (
     merge_player_points,
     save_scoring_weights,
 )
+from cric_rep_learn.data.player_attributes import load_attributes_index
 
 
 def _spearman(a: np.ndarray, b: np.ndarray) -> float:
@@ -120,15 +121,16 @@ def build_match_box_scores(
 
     batting = batting.merge(names, on="player_id", how="left")
     bowling = bowling.merge(names, on="player_id", how="left")
-    batting["overs"] = 0.0
-    batting["wickets"] = 0.0
-    batting["runs_conceded"] = 0.0
-    batting["economy"] = None
-    bowling["runs"] = 0.0
-    bowling["balls"] = 0.0
-    bowling["fours"] = 0.0
-    bowling["sixes"] = 0.0
-    bowling["dismissals"] = 0.0
+    # Opposite-role placeholders must be NaN (not 0) so all-rounders keep
+    # bowling stats after coalesce. Zeros previously masked overs/wickets.
+    batting["overs"] = np.nan
+    batting["wickets"] = np.nan
+    batting["runs_conceded"] = np.nan
+    bowling["runs"] = np.nan
+    bowling["balls"] = np.nan
+    bowling["fours"] = np.nan
+    bowling["sixes"] = np.nan
+    bowling["dismissals"] = np.nan
     bowling["overs"] = bowling["legal_balls"] / 6.0
     bowling["economy"] = np.where(
         bowling["overs"] > 0,
@@ -144,9 +146,11 @@ def build_match_box_scores(
         how="outer",
         suffixes=("_bat", "_bowl"),
     )
-    def _coalesce(frame, bat_col, bowl_col, default=0.0):
-        a = frame.get(bat_col)
-        b = frame.get(bowl_col)
+
+    def _coalesce(frame, primary_col, secondary_col, default=0.0):
+        """Prefer primary; fall back to secondary. Order matters for all-rounders."""
+        a = frame.get(primary_col)
+        b = frame.get(secondary_col)
         if a is None:
             return b.fillna(default) if b is not None else default
         if b is None:
@@ -181,14 +185,18 @@ def build_match_box_scores(
             "player_id": merged["player_id"],
             "player_name": player_name,
             "team": team,
+            # Batting columns: prefer bat side.
             "runs": _coalesce(merged, "runs_bat", "runs_bowl"),
             "balls": _coalesce(merged, "balls_bat", "balls_bowl"),
             "fours": _coalesce(merged, "fours_bat", "fours_bowl"),
             "sixes": _coalesce(merged, "sixes_bat", "sixes_bowl"),
             "dismissals": _coalesce(merged, "dismissals_bat", "dismissals_bowl"),
-            "wickets": _coalesce(merged, "wickets_bat", "wickets_bowl"),
-            "overs": _coalesce(merged, "overs_bat", "overs_bowl"),
-            "runs_conceded": _coalesce(merged, "runs_conceded_bat", "runs_conceded_bowl"),
+            # Bowling columns: prefer bowl side (safe even if bat is NaN).
+            "wickets": _coalesce(merged, "wickets_bowl", "wickets_bat"),
+            "overs": _coalesce(merged, "overs_bowl", "overs_bat"),
+            "runs_conceded": _coalesce(
+                merged, "runs_conceded_bowl", "runs_conceded_bat"
+            ),
         }
     )
     frame["economy"] = np.where(
@@ -250,11 +258,17 @@ def score_prediction_frame(frame) -> Any:
                         "expected_balls": float(row.get("expected_balls") or 0.0),
                         "expected_fours": float(row.get("expected_fours") or 0.0),
                         "expected_sixes": float(row.get("expected_sixes") or 0.0),
+                        "p_runs_ge30": row.get("p_runs_ge30"),
+                        "p_runs_ge50": row.get("p_runs_ge50"),
+                        "p_runs_ge100": row.get("p_runs_ge100"),
                     },
                     bowling={
                         "expected_wickets": float(row.get("expected_wickets") or 0.0),
                         "expected_overs": float(row.get("expected_overs") or 0.0),
                         "expected_economy": row.get("expected_economy"),
+                        "p_wickets_ge3": row.get("p_wickets_ge3"),
+                        "p_wickets_ge4": row.get("p_wickets_ge4"),
+                        "p_wickets_ge5": row.get("p_wickets_ge5"),
                     },
                 )["fantasy_points"]
             )
@@ -393,6 +407,7 @@ def run_calibration(
     chase_impacts_path: Path = Path("artifacts/baselines/chase_impacts.json"),
     co_batters_path: Path = Path("artifacts/co-batters/co_batters.parquet"),
     weather_dir: Path | None = None,
+    opportunity: str = "scheduled",
 ) -> dict[str, Any]:
     load_scoring_weights()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -401,14 +416,20 @@ def run_calibration(
     pq.write_table(table, box_path, compression="zstd")
 
     print(
-        f"reconstructing ≤{max_matches} holdout matches for MC calibration...",
+        f"reconstructing ≤{max_matches} holdout matches for MC calibration "
+        f"(opportunity={opportunity})...",
         flush=True,
+    )
+    attributes = (
+        load_attributes_index(attributes_path) if attributes_path.exists() else None
     )
     setups = reconstruct_holdout_matches(
         canonical_dir,
         splits=splits,
         max_matches=max_matches,
         seed=seed,
+        attributes=attributes,
+        opportunity=opportunity,
     )
     print(f"running HB MC on {len(setups)} matches × {n_sims} sims...", flush=True)
     pred_frame = predict_holdout_via_mc(
@@ -450,6 +471,7 @@ def run_calibration(
             "metric": "spearman_hb_mc_vs_actual + 0.25*top11",
             "n_sims": n_sims,
             "max_matches": max_matches,
+            "opportunity": opportunity,
             "tune": tune,
         },
     )
@@ -467,6 +489,7 @@ def run_calibration(
         "n_matches_mc": int(len(setups)),
         "n_sims": n_sims,
         "splits": list(splits),
+        "opportunity": opportunity,
         "tune": tune,
         "weights_path": str(weights_path),
         "blind_spots": {
@@ -548,6 +571,15 @@ def main() -> None:
         default=None,
         help="Optional weather dir for historical match_date joins",
     )
+    parser.add_argument(
+        "--opportunity",
+        choices=("actual", "scheduled"),
+        default="scheduled",
+        help=(
+            "Holdout bowling opportunity: production list-order quotas "
+            "(default) or actual overs from the match"
+        ),
+    )
     args = parser.parse_args()
     splits = tuple(s.strip() for s in args.splits.split(",") if s.strip())
     report = run_calibration(
@@ -563,6 +595,7 @@ def main() -> None:
         chase_impacts_path=args.chase_impacts,
         co_batters_path=args.co_batters,
         weather_dir=args.weather,
+        opportunity=args.opportunity,
     )
     print(json.dumps(report, indent=2))
 

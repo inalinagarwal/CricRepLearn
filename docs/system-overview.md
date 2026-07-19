@@ -143,9 +143,11 @@ On top of the matchup hierarchy, rates are tilted by:
 
 ### 7.1 Single innings
 
-- Full batting order (11) and bowling attack (typically 5, max 4 overs each)
-- Phase-weighted over allocation (death / powerplay / middle preferences from
-  train bowler profiles)
+- Full batting order (11; list order = batting order) and bowling attack
+  (5 × 4 overs, or 6 with `4-4-4-4-2-2`; list order = bowling priority)
+- Cricket-aware over allocation: death pace-only, PP pace vs top order
+  (spin opens only over 0 if #1 is spin), top spinners bowl out before death;
+  phase scores from train break ties
 - Per-ball: sample dismissal from HB hazard; else sample runs from
   `P(0,1,2,4,6 | SR bucket)` (`artifacts/baselines/run_outcome_by_sr.json`)
 - Track fours / sixes / dots for fantasy boundary components
@@ -194,9 +196,9 @@ Weights load from `artifacts/fantasy/scoring_weights.json`.
    Spearman(pred, actual) + 0.25 × top-11 hit rate.
 
 **Latest plan-scale result (100 matches × 50 sims):** best `BOWL_WICKET = 25`,
-Spearman ≈ 0.05, top-11 hit ≈ 0.54. Bowl-heavy / bat-heavy tails remain the
-main blind spots. Sample size alone will not fix ranking; opportunity
-allocation and wicket/knock tails matter more.
+Spearman ≈ 0.078, top-11 hit ≈ 0.54 after MC haul/milestone tail scoring +
+spell overdispersion (was ≈ 0.055 post-allocation). Bowl-heavy / opportunity
+mismatch remain the main blind spots. Sample size alone will not fix ranking.
 
 ### 8.3 Roles and credits
 
@@ -279,9 +281,9 @@ tests/              Correctness, fantasy, simulation, app modes
 Current fantasy ranking on holdout MC is honest but weak (≈54% top-11 hit).
 Highest-leverage improvements:
 
-1. Better **opportunity** (over share, confirmed bowling plans, batting order)
-2. Stronger **wicket / haul** tails
-3. Better **boundary / big-score** tails (batter×phase×pace)
+1. Better **opportunity** (pred↔actual over share still weak on holdout)
+2. Calibrated **dismissal / wicket means** when attack reconstruct mismatches
+3. Optional full **per-sim fantasy EV** (beyond haul/milestone survival probs)
 4. Re-calibrate fantasy weights after rate fixes (200 → full validation)
 5. Keep embeddings as garnish unless they beat HB on player-level forecasts
 

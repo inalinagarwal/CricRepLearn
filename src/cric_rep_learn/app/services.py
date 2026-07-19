@@ -17,7 +17,7 @@ from cric_rep_learn.players.card import resolve_player
 from cric_rep_learn.players.forecast_vs_attack import forecast_vs_attack
 from cric_rep_learn.simulation.attack import (
     BowlerSpell,
-    attach_phase_profiles,
+    configure_attack,
     load_bowler_phase_profiles,
 )
 from cric_rep_learn.simulation.chase import load_chase_impacts
@@ -45,6 +45,7 @@ def _parse_names(raw: str | list[str]) -> list[str]:
 
 
 def _resolve_lineup(names: list[str], aliases, attributes) -> list[dict[str, Any]]:
+    """Resolve names in list order = batting order (1st = opener)."""
     lineup = []
     for query in names:
         resolved = resolve_player(query, aliases, attributes=attributes)
@@ -63,6 +64,7 @@ def _resolve_lineup(names: list[str], aliases, attributes) -> list[dict[str, Any
 def _resolve_attack(
     names: list[str], aliases, attributes, *, canonical_dir: Path
 ) -> list[BowlerSpell]:
+    """Resolve bowlers in list order = bowling priority; set pace + quotas."""
     attack: list[BowlerSpell] = []
     for q in names:
         resolved = resolve_player(q, aliases, attributes=attributes)
@@ -70,11 +72,10 @@ def _resolve_attack(
             BowlerSpell(
                 player_id=resolved["player_id"],
                 player_name=resolved["player_name"],
-                max_overs=4,
             )
         )
     profiles = load_bowler_phase_profiles(canonical_dir, [b.player_id for b in attack])
-    return attach_phase_profiles(attack, profiles)
+    return configure_attack(attack, profiles=profiles, attributes=attributes)
 
 
 def run_dream_xi(

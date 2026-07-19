@@ -8,7 +8,7 @@ import pandas as pd
 from cric_rep_learn.baselines.historical import HistoricalBaseline, MatchContext
 from cric_rep_learn.data.bowling_style import parse_batting_hand, parse_bowling_style
 from cric_rep_learn.players.card import hierarchical_matchup, resolve_player
-from tests.test_baselines import delivery
+from test_baselines import delivery
 
 
 def test_parse_starc_style() -> None:

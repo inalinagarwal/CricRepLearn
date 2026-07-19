@@ -126,7 +126,11 @@ See [`docs/expected-contribution.md`](docs/expected-contribution.md) for the
 player-centric fixed-opportunity batting objective and embedding success gate.
 
 See [`docs/player-centric.md`](docs/player-centric.md) for hierarchical
-matchup lookup (Rohit → vs Starc → Aus left-arm pace → left-arm pace).
+matchup lookup, HB player-effect vectors, co-batter peers,
+`cric-rank-vs-bowler`, and `cric-forecast-vs-attack`.
+
+See [`docs/innings-simulation.md`](docs/innings-simulation.md) for the Monte
+Carlo T20 innings simulator (powerplay/middle/death, L/R, strike rotation).
 
 See [`docs/project-guide.md`](docs/project-guide.md) for the complete product
 direction, code map, training guide, current limitations, and decisions that

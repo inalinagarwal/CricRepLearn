@@ -45,19 +45,9 @@ def resolve_player(
 
     # Prefer cricketdata full_name hits mapped to our highest-evidence alias.
     # This resolves "Rohit Sharma" → RG Sharma (740742ef), not the rare alias.
-    full_name_ids: set[str] = set()
+    # Exact Cricsheet aliases win first so "E Lewis" / "AD Russell" stay stable.
     lowered = query.lower()
     tokens = [token for token in re.split(r"\s+", lowered) if token]
-    for player_id, attrs in attributes.items():
-        full_name = str(attrs.get("full_name") or "").lower()
-        if not full_name:
-            continue
-        if (
-            lowered == full_name
-            or lowered in full_name
-            or (tokens and all(token in full_name for token in tokens))
-        ):
-            full_name_ids.add(player_id)
 
     exact = aliases[
         aliases["player_name"].str.fullmatch(re.escape(query), case=False, na=False)
@@ -65,7 +55,64 @@ def resolve_player(
     contains = aliases[
         aliases["player_name"].str.contains(re.escape(query), case=False, na=False)
     ]
-    if full_name_ids:
+
+    full_name_ids: set[str] = set()
+    significant = [token for token in tokens if len(token) >= 2]
+    for player_id, attrs in attributes.items():
+        full_name = str(attrs.get("full_name") or "").lower()
+        if not full_name:
+            continue
+        if lowered == full_name or (len(lowered) >= 4 and lowered in full_name):
+            full_name_ids.add(player_id)
+            continue
+        # Require substantial tokens so "E Lewis" does not match every "... e ...".
+        if significant and all(token in full_name for token in significant):
+            full_name_ids.add(player_id)
+            continue
+        # Nickname / short first name: "Joe Root" → Joseph ... Root
+        if len(significant) >= 2:
+            surname = significant[-1]
+            first = significant[0]
+            name_parts = [part for part in full_name.replace("-", " ").split() if part]
+            first_aliases = {
+                first,
+                *{
+                    "joe": ("joseph",),
+                    "chris": ("christopher",),
+                    "matt": ("matthew",),
+                    "mike": ("michael",),
+                    "will": ("william",),
+                    "bill": ("william",),
+                    "alex": ("alexander", "alexandra"),
+                    "sam": ("samuel",),
+                    "ben": ("benjamin",),
+                    "tom": ("thomas",),
+                    "jim": ("james",),
+                    "josh": ("joshua",),
+                    "dan": ("daniel",),
+                    "steve": ("steven", "stephen"),
+                    "rob": ("robert",),
+                    "tony": ("anthony",),
+                    "harry": ("harold", "harrison", "henry"),
+                    "jon": ("jonathan", "john"),
+                    "jack": ("john",),
+                }.get(first, ()),
+            }
+            if name_parts and surname == name_parts[-1] and any(
+                part == alias or part.startswith(alias) or alias.startswith(part)
+                for part in name_parts[:-1]
+                for alias in first_aliases
+            ):
+                full_name_ids.add(player_id)
+
+    # Initials-style aliases ("E Lewis", "AD Russell", "P Kumar") prefer exact
+    # Cricsheet names. Full display names ("Rohit Sharma") prefer cricketdata
+    # full_name → highest-evidence player_id.
+    has_initial_token = any(len(token) <= 2 for token in tokens)
+    if len(exact) and (has_initial_token or not full_name_ids):
+        candidates = exact
+        matched_by = "name"
+    elif full_name_ids:
         candidates = aliases[aliases["player_id"].isin(full_name_ids)]
         matched_by = "full_name"
     elif len(exact):

@@ -313,6 +313,7 @@ def test_calibration_tune_smoke(tmp_path: Path) -> None:
     import pandas as pd
 
     rows = []
+    pred_rows = []
     for m in range(5):
         for p in range(12):
             rows.append(
@@ -333,9 +334,27 @@ def test_calibration_tune_smoke(tmp_path: Path) -> None:
                     "fantasy_points": 0.0,
                 }
             )
+            # Noisy MC-like predictions (not shrink-of-actual).
+            pred_rows.append(
+                {
+                    "match_id": f"m{m}",
+                    "player_id": f"p{p}",
+                    "player_name": f"P{p}",
+                    "team": "A" if p < 6 else "B",
+                    "expected_runs": 8 + 0.8 * p + (m % 3),
+                    "expected_balls": 7 + 0.5 * p,
+                    "expected_fours": max(0, (p % 3) - 0.2),
+                    "expected_sixes": max(0, (p % 2) - 0.1),
+                    "expected_wickets": 0.7 if p >= 8 else 0.05,
+                    "expected_overs": 3.5 if p >= 8 else 0.0,
+                    "expected_economy": 7.2 if p >= 8 else None,
+                }
+            )
     frame = pd.DataFrame(rows)
-    result = tune_bowl_wicket_weight(frame, max_matches=5)
+    pred = pd.DataFrame(pred_rows)
+    result = tune_bowl_wicket_weight(frame, pred_frame=pred, max_matches=5)
     assert result["best"]["BOWL_WICKET"] in {25.0, 30.0, 35.0}
+    assert result["method"] == "hb_mc_holdout"
     assert "spearman" in result["best"]
     weights_path = tmp_path / "scoring_weights.json"
     save_scoring_weights(
@@ -345,3 +364,21 @@ def test_calibration_tune_smoke(tmp_path: Path) -> None:
     loaded = load_scoring_weights(weights_path)
     assert loaded["BOWL_WICKET"] == result["best"]["BOWL_WICKET"]
     assert _spearman(np.array([1.0, 2.0, 3.0]), np.array([1.0, 2.0, 3.5])) > 0.9
+
+
+def test_reconstruct_holdout_smoke() -> None:
+    from pathlib import Path
+
+    from cric_rep_learn.fantasy.holdout_mc import reconstruct_holdout_matches
+
+    canonical = Path("artifacts/canonical")
+    if not (canonical / "deliveries.parquet").exists():
+        pytest.skip("canonical artifacts not present")
+    setups = reconstruct_holdout_matches(
+        canonical, splits=("validation",), max_matches=3, seed=0
+    )
+    assert len(setups) >= 1
+    s0 = setups[0]
+    assert len(s0.first_lineup) >= 2
+    assert len(s0.first_attack) >= 1
+    assert s0.first_team and s0.chase_team

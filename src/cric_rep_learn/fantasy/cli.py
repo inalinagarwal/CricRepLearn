@@ -86,6 +86,76 @@ def _resolve_attack(names, aliases, attributes, *, canonical_dir: Path):
     return attach_phase_profiles(attack, profiles)
 
 
+def _fmt_match(label: str, match: dict[str, Any]) -> str:
+    return (
+        f"{label}: first {match.get('first_expected_runs', 0):.1f} → "
+        f"chase {match.get('chase_expected_runs', 0):.1f}  "
+        f"P(chase win)={match.get('p_chase_win', 0):.2f}"
+    )
+
+
+def print_summary(result: dict[str, Any]) -> None:
+    """Human-readable XI + pool table (avoids dumping full JSON to the terminal)."""
+    lines: list[str] = []
+    lines.append(f"Venue: {result.get('venue')}  Date: {result.get('match_date')}")
+    vp = result.get("venue_profile") or {}
+    if vp.get("target_roles"):
+        lines.append(f"Venue roles target: {vp['target_roles']}")
+    ta = result.get("toss_a_match") or {}
+    tb = result.get("toss_b_match") or {}
+    if ta:
+        lines.append(_fmt_match("Toss A (team A bat first)", ta))
+    if tb:
+        lines.append(_fmt_match("Toss B (team B bat first)", tb))
+
+    xi = (result.get("optimized") or {}).get("best_xi") or {}
+    lines.append("")
+    lines.append(
+        f"BEST XI  obj={xi.get('objective_score', 0):.1f}  "
+        f"C/VC pts={xi.get('xi_points_with_cv', 0):.1f}  "
+        f"balance pen={xi.get('balance_penalty', 0):.1f}"
+    )
+    cap = xi.get("captain") or {}
+    vc = xi.get("vice_captain") or {}
+    lines.append(f"C:  {cap.get('player_name')}  (×{cap.get('multiplier')})")
+    lines.append(f"VC: {vc.get('player_name')}  (×{vc.get('multiplier')})")
+    lines.append(
+        f"Credits: {xi.get('credits_used')}  Roles: {xi.get('roles')}  Teams: {xi.get('teams')}"
+    )
+    lines.append(f"{'Role':4} {'Tm':3} {'Player':22} {'Pts':>7} {'Cr':>5}")
+    for p in xi.get("players") or []:
+        cr = p.get("credits")
+        cr_s = f"{cr:.1f}" if cr is not None else "-"
+        lines.append(
+            f"{p.get('role', '?'):4} {p.get('team', '?'):3} "
+            f"{p.get('player_name', '?'):22} {float(p.get('fantasy_points') or 0):7.1f} {cr_s:>5}"
+        )
+
+    lines.append("")
+    lines.append("PLAYER POOL (all 22)")
+    lines.append(f"{'Role':4} {'Tm':3} {'Player':22} {'Pts':>7} {'Bat':>6} {'Bowl':>6}")
+    for p in result.get("player_pool") or []:
+        lines.append(
+            f"{p.get('role', '?'):4} {p.get('team', '?'):3} "
+            f"{p.get('player_name', '?'):22} {float(p.get('fantasy_points') or 0):7.1f} "
+            f"{float(p.get('batting_points') or 0):6.1f} "
+            f"{float(p.get('bowling_points') or 0):6.1f}"
+        )
+
+    alts = (result.get("optimized") or {}).get("top_xis") or []
+    if len(alts) > 1:
+        lines.append("")
+        lines.append("ALT XIs")
+        for i, alt in enumerate(alts[1:], start=2):
+            names = ", ".join(p["player_name"] for p in (alt.get("players") or [])[:5])
+            lines.append(
+                f"#{i} obj={alt.get('objective_score', 0):.1f} "
+                f"C={alt.get('captain', {}).get('player_name')} "
+                f"VC={alt.get('vice_captain', {}).get('player_name')}  {names}…"
+            )
+    print("\n".join(lines))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--team-a-name", default="IND")
@@ -115,6 +185,17 @@ def main() -> None:
         "--embedding-tiebreak",
         action="store_true",
         help="Optional HB⊕embedding garnish when ranking near-tied pool points",
+    )
+    parser.add_argument(
+        "--summary",
+        action="store_true",
+        help="Print a compact XI/pool table instead of full JSON",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Write full JSON result to this path (useful with --summary)",
     )
     parser.add_argument("--venue", default=None)
     parser.add_argument("--date", default=None)
@@ -178,7 +259,6 @@ def main() -> None:
 
     attack_ids = {b.player_id for b in a_bowl + b_bowl}
     squad = a_bat + b_bat
-    # Attach batting order within each team for role inference.
     for i, row in enumerate(a_bat):
         row["batting_order"] = i + 1
     for i, row in enumerate(b_bat):
@@ -304,7 +384,14 @@ def main() -> None:
             "embedding_tiebreak": bool(args.embedding_tiebreak),
         },
     }
-    print(json.dumps(result, indent=2))
+    if args.output is not None:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        print(f"wrote full JSON → {args.output}", file=sys.stderr)
+    if args.summary or args.output is not None:
+        print_summary(result)
+    else:
+        print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":

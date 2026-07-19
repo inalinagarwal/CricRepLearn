@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CricRepLearn</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="grain" aria-hidden="true"></div>
+  <header class="hero">
+    <p class="brand">CricRepLearn</p>
+    <h1>Monte Carlo cricket,<br />three ways in.</h1>
+    <p class="lede">
+      Hierarchical batter–bowler priors feed a full-innings simulator.
+      Pick a Dream XI, read a match card, or deep-dive one player vs an attack.
+    </p>
+    <nav class="modes" aria-label="Product modes">
+      <button type="button" class="mode" data-mode="dream" aria-pressed="true">Dream XI</button>
+      <button type="button" class="mode" data-mode="match" aria-pressed="false">Match sim</button>
+      <button type="button" class="mode" data-mode="dive" aria-pressed="false">Player dive</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="panel-dream" class="panel active">
+      <h2>Dream XI</h2>
+      <p class="hint">Toss-averaged fantasy MC → constrained XI with C/VC search.</p>
+      <form id="form-dream">
+        <div class="grid2">
+          <label>Team A batters (11)
+            <textarea name="team_a_batters" rows="3"></textarea>
+          </label>
+          <label>Team B batters (11)
+            <textarea name="team_b_batters" rows="3"></textarea>
+          </label>
+          <label>Team A bowlers (5)
+            <textarea name="team_a_bowlers" rows="2"></textarea>
+          </label>
+          <label>Team B bowlers (5)
+            <textarea name="team_b_bowlers" rows="2"></textarea>
+          </label>
+        </div>
+        <div class="row">
+          <label>Venue <input name="venue" value="Lord's" /></label>
+          <label>Date <input name="date" placeholder="2026-07-20" /></label>
+          <label>Sims <input name="sims" type="number" value="40" min="10" max="200" /></label>
+        </div>
+        <button type="submit" class="cta">Optimize XI</button>
+      </form>
+    </section>
+
+    <section id="panel-match" class="panel">
+      <h2>Match sim</h2>
+      <p class="hint">Expected runs, wickets, and over-by-over shape for one toss scenario.</p>
+      <form id="form-match">
+        <div class="grid2">
+          <label>First batters
+            <textarea name="first_batters" rows="3"></textarea>
+          </label>
+          <label>Chase batters
+            <textarea name="chase_batters" rows="3"></textarea>
+          </label>
+          <label>First bowlers (chase attack)
+            <textarea name="first_bowlers" rows="2"></textarea>
+          </label>
+          <label>Chase bowlers (first attack bowling)
+            <textarea name="chase_bowlers" rows="2"></textarea>
+          </label>
+        </div>
+        <div class="row">
+          <label>Venue <input name="venue" value="Lord's" /></label>
+          <label>Date <input name="date" placeholder="2026-07-20" /></label>
+          <label>Sims <input name="sims" type="number" value="60" min="10" max="200" /></label>
+        </div>
+        <button type="submit" class="cta">Simulate match</button>
+      </form>
+    </section>
+
+    <section id="panel-dive" class="panel">
+      <h2>Player dive</h2>
+      <p class="hint">One batter vs a named attack — matchup hierarchy, venue shrinkage, survival balls.</p>
+      <form id="form-dive">
+        <div class="row">
+          <label>Batter <input name="batter" value="Chris Gayle" /></label>
+          <label>Venue <input name="venue" value="Rawalpindi" /></label>
+        </div>
+        <label>Bowlers (comma-separated)
+          <textarea name="bowlers" rows="2">Mohammad Hafeez,Wahab Riaz,Shaheen Shah Afridi,Shadab Khan,Haris Rauf</textarea>
+        </label>
+        <button type="submit" class="cta">Forecast</button>
+      </form>
+    </section>
+
+    <section class="results" id="results" hidden>
+      <div class="results-head">
+        <h2 id="results-title">Results</h2>
+        <p id="status" class="status"></p>
+      </div>
+      <pre id="output"></pre>
+    </section>
+  </main>
+
+  <footer>
+    <p>CLI stays first-class: <code>cric dream-xi</code> · <code>cric match-sim</code> · <code>cric player-dive</code> · <code>cric ui</code></p>
+  </footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -23,6 +23,11 @@ dev = [
     "pytest>=8",
     "ruff>=0.5",
 ]
+ui = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+]
 
 [project.scripts]
 cric-build-data = "cric_rep_learn.data.build:main"
@@ -44,6 +49,8 @@ cric-simulate-innings = "cric_rep_learn.simulation.cli:main"
 cric-simulate-match = "cric_rep_learn.simulation.match_cli:main"
 cric-optimize-xi = "cric_rep_learn.fantasy.cli:main"
 cric-calibrate-fantasy = "cric_rep_learn.fantasy.calibration:main"
+cric = "cric_rep_learn.app.cli:main"
+cric-ui = "cric_rep_learn.app.web:main"
 cric-build-weather = "cric_rep_learn.weather:main"
 cric-build-contribution-data = "cric_rep_learn.contribution.data:main"
 cric-train-contribution = "cric_rep_learn.contribution.train:main"
@@ -51,6 +58,9 @@ cric-evaluate-contribution = "cric_rep_learn.contribution.evaluate:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"cric_rep_learn.app" = ["static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

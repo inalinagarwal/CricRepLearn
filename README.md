@@ -1,151 +1,129 @@
 # CricRepLearn
 
-CricRepLearn is an experimental system for learning contextual T20 cricket
-player representations from ball-by-ball data.
+Probabilistic T20 cricket modelling: hierarchical Bayes matchups, Monte Carlo
+match simulation, and constrained fantasy XI optimization — with a CLI and a
+local web UI.
 
-The intended system learns separate role-specific representations for batting
-and bowling. These representations can then be combined with the players,
-venue, competition, phase, match state, and other available context for a
-future fixture. The longer-term goal is to predict player performance and
-select a constrained fantasy-cricket XI.
+Given two squads and a venue, you can:
 
-## Project status
+1. **Dream XI** — simulate both tosses, score fantasy points, pick a legal XI  
+2. **Match sim** — expected runs/wickets and over-by-over shape  
+3. **Player dive** — one batter vs an attack (venue / phase / weather aware)
 
-This repository is being rebuilt as a reproducible research project. The new
-data foundation currently contains:
+Deep technical write-up: [`docs/system-overview.md`](docs/system-overview.md).
 
-- Stable player identity through Cricsheet registry UUIDs
-- Canonical match, squad, delivery, wicket, and player-alias tables
-- Correct treatment of wides, no-balls, and pre-delivery innings state
-- Source deduplication with hashes and revision metadata
-- Match-level chronological train, validation, and test assignments
-- Tests for identity, wicket attribution, legal balls, state, and leakage
-- Rolling global, contextual, player, venue, and matchup baselines
+## Requirements
 
-Representation learning is now implemented as a dual-role residual multitask
-network. Full validation training and architecture ablations are the current
-research stage; opportunity modelling and Dream11 optimization come next.
+- Python 3.11+
+- Local artifacts under `artifacts/` (canonical data, player effects, etc.) —
+  not shipped in git; rebuild from Cricsheet or use your existing build
 
-## Planned pipeline
-
-1. Build a canonical delivery dataset from all available T20 matches.
-2. Resolve players through stable Cricsheet registry identifiers.
-3. Create chronological train, validation, and test splits.
-4. Establish statistical player and matchup baselines.
-5. Train and evaluate contextual batting and bowling representations.
-6. Model expected player opportunities, including batting position and overs.
-7. Predict performance for arbitrary future fixtures.
-8. Convert predictions to fantasy points and optimize the final XI.
-
-## Repository layout
-
-```text
-src/cric_rep_learn/data/     Canonical ingestion and chronological splitting
-src/cric_rep_learn/baselines/ Rolling empirical-Bayes baselines and metrics
-src/cric_rep_learn/representations/ Dual-role neural player embeddings
-tests/                       Data correctness and leakage tests
-docs/                        Design and data documentation
-```
-
-Raw data, generated datasets, and model artifacts are intentionally excluded
-from Git. They can be rebuilt locally and will later be managed through a
-versioned data/artifact workflow.
-
-## Environment
-
-Python 3.11 or newer is recommended.
+## Install
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
+pip install -U pip
+pip install -e ".[dev]"
+# optional web UI:
+pip install -e ".[ui]"
 ```
 
-## Build the canonical dataset
+## Quick start — CLI
 
-Place downloaded Cricsheet JSON folders below `data/`, then run:
+Unified entrypoint:
 
 ```bash
-cric-build-data --input data --output artifacts/canonical
+cric                  # interactive menu
+cric --help
 ```
 
-The build writes compressed Parquet tables plus metadata, skipped-match
-diagnostics, and a complete source manifest. Existing output is never replaced
-unless `--overwrite` is supplied explicitly.
-
-Create leakage-safe chronological assignments:
+### 1. Dream XI
 
 ```bash
-cric-split-data \
-  --matches artifacts/canonical/matches.parquet \
-  --output artifacts/canonical/split_manifest.parquet
+cric dream-xi \
+  --venue "Lord's" \
+  --date 2026-07-20 \
+  --sims 80 \
+  --max-credits 100
 ```
 
-Validate the complete serialized dataset and run the automated tests:
+Defaults use the Lord’s IND–ENG example squads. Override with
+`--team-a-batters`, `--team-b-batters`, `--team-a-bowlers`, `--team-b-bowlers`
+(comma-separated names).
+
+Lower-level CLI (full flags, JSON/`--summary`):
 
 ```bash
-cric-validate-data --dataset artifacts/canonical
-pytest
+cric-optimize-xi --summary --output artifacts/fantasy/xi.json ...
 ```
 
-Evaluate the statistical baselines:
+### 2. Match sim
 
 ```bash
-cric-evaluate-baselines \
-  --dataset artifacts/canonical \
-  --output artifacts/baselines/metrics.json
+cric match-sim --venue "Lord's" --date 2026-07-20 --sims 100
 ```
 
-## Weather
+Or: `cric-simulate-match ...`
 
-Weather can be added, but it is not part of Cricsheet. It remains a separate,
-provenance-tracked table keyed by match ID. A reliable historical join requires:
+### 3. Player dive (“Gayle mode”)
 
-- verified venue latitude, longitude, and timezone
-- scheduled local start time (Cricsheet generally supplies only the date)
-- an historical weather provider
-- the observation time and retrieval provenance
+```bash
+cric player-dive \
+  --batter "Chris Gayle" \
+  --bowlers "Mohammad Hafeez,Wahab Riaz,Shaheen Shah Afridi,Shadab Khan,Haris Rauf" \
+  --venue "Rawalpindi"
+```
 
-The canonical schemas reserve explicit venue-location and match-weather tables.
-Weather will only be used when its timestamp would have been available before
-the prediction, preventing forecast leakage.
+Or: `cric-forecast-vs-attack ...` / `cric-rank-vs-bowler ...`
 
-See [`docs/data-foundation.md`](docs/data-foundation.md) for table definitions,
-identity rules, validation guarantees, and the planned weather join.
+## Quick start — web UI
 
-See [`docs/statistical-baselines.md`](docs/statistical-baselines.md) for the
-delivery targets, historical update policy, smoothing hierarchy, and initial
-full-corpus results.
+```bash
+pip install -e ".[ui]"
+cric ui
+# open http://127.0.0.1:8765
+```
 
-See [`docs/representation-learning.md`](docs/representation-learning.md) for
-the dual-role embedding architecture, leakage controls, targets, checkpoint
-format, and why diffusion is deferred until after predictive validation.
+Same three modes in the browser. Lord’s IND–ENG forms are prefilled for Dream
+XI and match sim. First runs can take a minute (Monte Carlo).
 
-See [`docs/expected-contribution.md`](docs/expected-contribution.md) for the
-player-centric fixed-opportunity batting objective and embedding success gate.
+Also available as `cric-ui`.
 
-See [`docs/player-centric.md`](docs/player-centric.md) for hierarchical
-matchup lookup, HB player-effect vectors, co-batter peers,
-`cric-rank-vs-bowler`, and `cric-forecast-vs-attack`.
+## Fantasy calibration (optional)
 
-See [`docs/innings-simulation.md`](docs/innings-simulation.md) for the Monte
-Carlo T20 innings simulator (powerplay/middle/death, L/R, strike rotation).
+Tune scoring weights against holdout HB Monte Carlo:
 
-Fantasy XI: calibrate scoring on holdout box scores (`cric-calibrate-fantasy`),
-then optimize a constrained Dream XI (`cric-optimize-xi`) with auto roles,
-C/VC search, optional credit cap, and optional embedding tie-break only.
+```bash
+cric-calibrate-fantasy --max-matches 100 --n-sims 50
+```
 
-See [`docs/project-guide.md`](docs/project-guide.md) for the complete product
-direction, code map, training guide, current limitations, and decisions that
-still need review.
+Writes `artifacts/fantasy/scoring_weights.json` (current plan-scale best:
+`BOWL_WICKET = 25`).
 
-See [`docs/validation-analysis.md`](docs/validation-analysis.md) for the first
-validation calibration, subgroup, and ablation results on the residual model.
+## How it works (short)
+
+```text
+HB matchup hierarchy (batter ↔ bowler + venue/phase/chase/weather)
+    → Monte Carlo full innings / match
+    → fantasy points
+    → constrained XI (roles, max 7/side, C/VC, credits)
+```
+
+Neural embeddings exist for research; the live product path is **HB + MC**.
+Embeddings are optional tie-breaks only.
+
+## Docs
+
+| Doc | Contents |
+|-----|----------|
+| [`docs/system-overview.md`](docs/system-overview.md) | Full stack: data, baselines, representations, HB, MC, fantasy |
+| [`docs/product-modes.md`](docs/product-modes.md) | Three product modes |
+| [`docs/player-centric.md`](docs/player-centric.md) | Matchup hierarchy & forecasts |
+| [`docs/innings-simulation.md`](docs/innings-simulation.md) | Simulator details |
+| [`docs/data-foundation.md`](docs/data-foundation.md) | Canonical data & leakage |
 
 ## Data
 
-Ball-by-ball match data is sourced from
-[Cricsheet](https://cricsheet.org/). Cricsheet data is not redistributed in
-this repository. Follow Cricsheet's licensing and attribution requirements
-when downloading or using its datasets.
+Ball-by-ball data from [Cricsheet](https://cricsheet.org/). Raw data is not
+redistributed here; follow Cricsheet’s licensing when downloading.

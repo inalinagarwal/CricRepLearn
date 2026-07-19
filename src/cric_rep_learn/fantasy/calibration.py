@@ -1,4 +1,4 @@
-"""Calibrate fantasy scoring against holdout reconstructed box scores."""
+"""Calibrate fantasy scoring against holdout box scores via HB Monte Carlo."""
 
 from __future__ import annotations
 
@@ -12,6 +12,10 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from cric_rep_learn.fantasy.holdout_mc import (
+    predict_holdout_via_mc,
+    reconstruct_holdout_matches,
+)
 from cric_rep_learn.fantasy.scoring import (
     DEFAULT_WEIGHTS,
     batting_points,
@@ -226,34 +230,38 @@ def score_box_frame(frame) -> Any:
     return frame
 
 
-def closed_form_predict_points(
-    *,
-    expected_runs: float,
-    expected_balls: float,
-    expected_wickets: float,
-    expected_overs: float,
-    expected_economy: float | None,
-    expected_fours: float = 0.0,
-    expected_sixes: float = 0.0,
-) -> float:
-    row = merge_player_points(
-        player_id="x",
-        player_name="x",
-        team="T",
-        role="BAT",
-        batting={
-            "expected_runs": expected_runs,
-            "expected_balls": expected_balls,
-            "expected_fours": expected_fours,
-            "expected_sixes": expected_sixes,
-        },
-        bowling={
-            "expected_wickets": expected_wickets,
-            "expected_overs": expected_overs,
-            "expected_economy": expected_economy,
-        },
-    )
-    return float(row["fantasy_points"])
+def score_prediction_frame(frame) -> Any:
+    """Score rows that carry expected_* fantasy inputs."""
+    import pandas as pd
+
+    if not isinstance(frame, pd.DataFrame):
+        frame = frame.to_pandas()
+    pts = []
+    for row in frame.to_dict(orient="records"):
+        pts.append(
+            float(
+                merge_player_points(
+                    player_id=str(row["player_id"]),
+                    player_name=str(row.get("player_name") or row["player_id"]),
+                    team=str(row.get("team") or ""),
+                    role="BAT",
+                    batting={
+                        "expected_runs": float(row.get("expected_runs") or 0.0),
+                        "expected_balls": float(row.get("expected_balls") or 0.0),
+                        "expected_fours": float(row.get("expected_fours") or 0.0),
+                        "expected_sixes": float(row.get("expected_sixes") or 0.0),
+                    },
+                    bowling={
+                        "expected_wickets": float(row.get("expected_wickets") or 0.0),
+                        "expected_overs": float(row.get("expected_overs") or 0.0),
+                        "expected_economy": row.get("expected_economy"),
+                    },
+                )["fantasy_points"]
+            )
+        )
+    out = frame.copy()
+    out["fantasy_points"] = pts
+    return out
 
 
 def _topk_hit_rate(
@@ -275,61 +283,83 @@ def _topk_hit_rate(
     return float(np.mean(hits)) if hits else 0.0
 
 
+def align_actual_pred(actual_frame, pred_frame):
+    """Inner-join actual box scores to MC predictions on match_id+player_id."""
+    actual = (
+        actual_frame.to_pandas()
+        if hasattr(actual_frame, "to_pandas")
+        else actual_frame.copy()
+    )
+    pred = pred_frame.to_pandas() if hasattr(pred_frame, "to_pandas") else pred_frame.copy()
+    return actual.merge(pred, on=["match_id", "player_id"], how="inner", suffixes=("", "_pred"))
+
+
 def tune_bowl_wicket_weight(
     box_frame,
     *,
+    pred_frame=None,
     candidates: list[float] | None = None,
-    max_matches: int = 200,
+    max_matches: int = 100,
     seed: int = 7,
 ) -> dict[str, Any]:
     """
-    Grid-search BOWL_WICKET on holdout box scores (val-only by caller).
+    Grid-search BOWL_WICKET using holdout actual fantasy pts vs HB MC predictions.
 
-    Predicted points: shrink realized batting/bowling stats toward priors
-    (proxy for imperfect HB/MC forecast). Rank by Spearman + top-11 hit rate.
+    MC predictions are computed once outside this loop; only scoring weights change.
     """
     candidates = candidates or [25.0, 30.0, 35.0]
-    frame = box_frame.to_pandas() if hasattr(box_frame, "to_pandas") else box_frame.copy()
-    match_ids = sorted(frame["match_id"].unique().tolist())
+    if pred_frame is None:
+        raise ValueError("pred_frame from HB MC is required (shrink proxy removed)")
+
+    aligned = align_actual_pred(box_frame, pred_frame)
+    match_ids = sorted(aligned["match_id"].unique().tolist())
     rng = np.random.default_rng(seed)
     if len(match_ids) > max_matches:
         keep = set(rng.choice(match_ids, size=max_matches, replace=False).tolist())
-        frame = frame[frame["match_id"].isin(keep)].copy()
+        aligned = aligned[aligned["match_id"].isin(keep)].copy()
 
     best = None
     results = []
+    actual_cols = [
+        "match_id",
+        "player_id",
+        "player_name",
+        "team",
+        "runs",
+        "balls",
+        "fours",
+        "sixes",
+        "wickets",
+        "overs",
+        "economy",
+    ]
     for wicket_pts in candidates:
         trial = Path("/tmp/fantasy_weight_trial.json")
         save_scoring_weights({**DEFAULT_WEIGHTS, "BOWL_WICKET": wicket_pts}, trial)
         load_scoring_weights(trial)
-        scored = score_box_frame(frame)
-        pred_rows = []
-        for row in scored.to_dict(orient="records"):
-            pred_rows.append(
-                closed_form_predict_points(
-                    expected_runs=0.75 * float(row["runs"]) + 0.25 * 20.0,
-                    expected_balls=0.75 * float(row["balls"]) + 0.25 * 15.0,
-                    expected_fours=0.75 * float(row.get("fours") or 0),
-                    expected_sixes=0.75 * float(row.get("sixes") or 0),
-                    expected_wickets=0.75 * float(row.get("wickets") or 0) + 0.25 * 0.8,
-                    expected_overs=0.75 * float(row.get("overs") or 0) + 0.25 * 2.0,
-                    expected_economy=float(row["economy"])
-                    if row.get("economy") == row.get("economy")
-                    else 7.5,
-                )
-            )
-        actual = scored["fantasy_points"].to_numpy(dtype=np.float64)
-        pred = np.asarray(pred_rows, dtype=np.float64)
+
+        actual_scored = score_box_frame(aligned[[c for c in actual_cols if c in aligned.columns]])
+        pred_scored = score_prediction_frame(aligned)
+        actual = actual_scored["fantasy_points"].to_numpy(dtype=np.float64)
+        pred = pred_scored["fantasy_points"].to_numpy(dtype=np.float64)
         mae = float(np.mean(np.abs(pred - actual)))
         spearman = _spearman(pred, actual)
-        topk = _topk_hit_rate(scored, pred, k=11)
+        topk = _topk_hit_rate(actual_scored, pred, k=11)
+        bowl_mask = aligned["wickets"].to_numpy(dtype=np.float64) >= 2
+        bat_mask = aligned["runs"].to_numpy(dtype=np.float64) >= 40
         row = {
             "BOWL_WICKET": wicket_pts,
             "mae": mae,
             "spearman": spearman,
             "top11_hit_rate": topk,
-            "n_matches": int(frame["match_id"].nunique()),
-            "n_rows": int(len(scored)),
+            "mae_bowl_heavy": float(np.mean(np.abs(pred[bowl_mask] - actual[bowl_mask])))
+            if bowl_mask.any()
+            else None,
+            "mae_bat_heavy": float(np.mean(np.abs(pred[bat_mask] - actual[bat_mask])))
+            if bat_mask.any()
+            else None,
+            "n_matches": int(aligned["match_id"].nunique()),
+            "n_rows": int(len(aligned)),
             "actual_mean": float(actual.mean()),
             "pred_mean": float(pred.mean()),
             "score": spearman + 0.25 * topk,
@@ -339,7 +369,12 @@ def tune_bowl_wicket_weight(
             best = row
 
     assert best is not None
-    return {"candidates": results, "best": best, "max_matches": max_matches}
+    return {
+        "candidates": results,
+        "best": best,
+        "max_matches": max_matches,
+        "method": "hb_mc_holdout",
+    }
 
 
 def run_calibration(
@@ -347,6 +382,17 @@ def run_calibration(
     output_dir: Path,
     *,
     splits: tuple[str, ...] = ("validation",),
+    max_matches: int = 100,
+    n_sims: int = 50,
+    seed: int = 7,
+    attributes_path: Path = Path("artifacts/player-attributes/player_attributes.parquet"),
+    effects_path: Path = Path("artifacts/player-effects/player_effects.parquet"),
+    matchups_path: Path = Path(
+        "artifacts/player-effects/batter_bowler_matchups.parquet"
+    ),
+    chase_impacts_path: Path = Path("artifacts/baselines/chase_impacts.json"),
+    co_batters_path: Path = Path("artifacts/co-batters/co_batters.parquet"),
+    weather_dir: Path | None = None,
 ) -> dict[str, Any]:
     load_scoring_weights()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -354,7 +400,46 @@ def run_calibration(
     box_path = output_dir / "match_box_scores.parquet"
     pq.write_table(table, box_path, compression="zstd")
 
-    tune = tune_bowl_wicket_weight(table)
+    print(
+        f"reconstructing ≤{max_matches} holdout matches for MC calibration...",
+        flush=True,
+    )
+    setups = reconstruct_holdout_matches(
+        canonical_dir,
+        splits=splits,
+        max_matches=max_matches,
+        seed=seed,
+    )
+    print(f"running HB MC on {len(setups)} matches × {n_sims} sims...", flush=True)
+    pred_frame = predict_holdout_via_mc(
+        setups,
+        canonical_dir=canonical_dir,
+        attributes_path=attributes_path,
+        effects_path=effects_path,
+        matchups_path=matchups_path,
+        chase_impacts_path=chase_impacts_path,
+        co_batters_path=co_batters_path,
+        weather_dir=weather_dir,
+        n_sims=n_sims,
+        seed=seed,
+    )
+    pred_path = output_dir / "mc_predictions.parquet"
+    pq.write_table(
+        pa.Table.from_pandas(pred_frame, preserve_index=False),
+        pred_path,
+        compression="zstd",
+    )
+
+    mc_matches = set(pred_frame["match_id"].unique())
+    box_pdf = table.to_pandas()
+    box_pdf = box_pdf[box_pdf["match_id"].isin(mc_matches)].copy()
+
+    tune = tune_bowl_wicket_weight(
+        box_pdf,
+        pred_frame=pred_frame,
+        max_matches=max_matches,
+        seed=seed,
+    )
     best_w = float(tune["best"]["BOWL_WICKET"])
     weights_path = output_dir / "scoring_weights.json"
     save_scoring_weights(
@@ -362,28 +447,33 @@ def run_calibration(
         weights_path,
         metadata={
             "tuned_on": list(splits),
-            "metric": "spearman_pred_vs_actual_shrunk",
+            "metric": "spearman_hb_mc_vs_actual + 0.25*top11",
+            "n_sims": n_sims,
+            "max_matches": max_matches,
             "tune": tune,
         },
     )
     load_scoring_weights(weights_path)
 
-    # Blind-spot summary for HB / fantasy: bowl vs bat tails and residual gaps.
-    frame = score_box_frame(table.to_pandas())
+    frame = score_box_frame(box_pdf)
     bowl_heavy = frame[frame["wickets"] >= 2].copy()
     bat_heavy = frame[frame["runs"] >= 40].copy()
     mid = frame[(frame["wickets"] < 2) & (frame["runs"] < 40)].copy()
+    best = tune["best"]
     report = {
         "box_scores": str(box_path),
-        "n_rows": int(len(frame)),
+        "mc_predictions": str(pred_path),
+        "n_rows_box": int(len(table)),
+        "n_matches_mc": int(len(setups)),
+        "n_sims": n_sims,
         "splits": list(splits),
         "tune": tune,
         "weights_path": str(weights_path),
         "blind_spots": {
             "note": (
-                "HB Monte Carlo under-predicts sparse-matchup and bowl-heavy tails; "
-                "bat-heavy high-SR knocks are also stress regions. Use embeddings only "
-                "as a fantasy tie-break garnish — do not retrain delivery residual nets."
+                "HB MC vs realized box scores: bowl-heavy (2+ wickets) and "
+                "bat-heavy (40+ runs) are the main stress regions. Embeddings "
+                "remain tie-break garnish only."
             ),
             "bowl_heavy_mean_pts": float(bowl_heavy["fantasy_points"].mean())
             if len(bowl_heavy)
@@ -394,6 +484,8 @@ def run_calibration(
             "mid_pack_mean_pts": float(mid["fantasy_points"].mean()) if len(mid) else None,
             "n_bowl_heavy": int(len(bowl_heavy)),
             "n_bat_heavy": int(len(bat_heavy)),
+            "mae_bowl_heavy": best.get("mae_bowl_heavy"),
+            "mae_bat_heavy": best.get("mae_bat_heavy"),
             "embedding_policy": "tie_break_only",
         },
     }
@@ -412,9 +504,66 @@ def main() -> None:
         default="validation",
         help="Comma-separated splits (default validation)",
     )
+    parser.add_argument(
+        "--max-matches",
+        type=int,
+        default=100,
+        help="Holdout matches for MC calibration (default 100)",
+    )
+    parser.add_argument(
+        "--n-sims",
+        type=int,
+        default=50,
+        help="Monte Carlo sims per innings (default 50)",
+    )
+    parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument(
+        "--attributes",
+        type=Path,
+        default=Path("artifacts/player-attributes/player_attributes.parquet"),
+    )
+    parser.add_argument(
+        "--effects",
+        type=Path,
+        default=Path("artifacts/player-effects/player_effects.parquet"),
+    )
+    parser.add_argument(
+        "--matchups",
+        type=Path,
+        default=Path("artifacts/player-effects/batter_bowler_matchups.parquet"),
+    )
+    parser.add_argument(
+        "--chase-impacts",
+        type=Path,
+        default=Path("artifacts/baselines/chase_impacts.json"),
+    )
+    parser.add_argument(
+        "--co-batters",
+        type=Path,
+        default=Path("artifacts/co-batters/co_batters.parquet"),
+    )
+    parser.add_argument(
+        "--weather",
+        type=Path,
+        default=None,
+        help="Optional weather dir for historical match_date joins",
+    )
     args = parser.parse_args()
     splits = tuple(s.strip() for s in args.splits.split(",") if s.strip())
-    report = run_calibration(args.canonical, args.output, splits=splits)
+    report = run_calibration(
+        args.canonical,
+        args.output,
+        splits=splits,
+        max_matches=args.max_matches,
+        n_sims=args.n_sims,
+        seed=args.seed,
+        attributes_path=args.attributes,
+        effects_path=args.effects,
+        matchups_path=args.matchups,
+        chase_impacts_path=args.chase_impacts,
+        co_batters_path=args.co_batters,
+        weather_dir=args.weather,
+    )
     print(json.dumps(report, indent=2))
 
 

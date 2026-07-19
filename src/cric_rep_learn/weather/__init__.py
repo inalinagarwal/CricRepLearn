@@ -18,6 +18,7 @@ import pyarrow.parquet as pq
 
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 PROVIDER = "open-meteo-archive"
 
 # Competitions that are predominantly night T20s (proxy without start time).
@@ -101,7 +102,10 @@ def fetch_daily_weather(
         ),
         "timezone": timezone_name,
     }
-    url = f"{ARCHIVE_URL}?{urllib.parse.urlencode(params)}"
+    # Archive for past dates; forecast endpoint for today/future.
+    today = date.today()
+    base = FORECAST_URL if end >= today else ARCHIVE_URL
+    url = f"{base}?{urllib.parse.urlencode(params)}"
     payload = _http_get_json(url)
     time.sleep(sleep_s)
     daily = payload.get("daily") or {}

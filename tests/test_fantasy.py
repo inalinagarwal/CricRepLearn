@@ -482,6 +482,58 @@ def test_reconstruct_holdout_smoke() -> None:
     assert sum(b.max_overs for b in setups_actual[0].first_attack) >= 1
 
 
+def test_holdout_min_batters_avoids_high_wicket_bias() -> None:
+    """
+    Requiring many *faced* batters selects collapse-heavy matches and makes
+    calibrated hazards look under-rate. Default min_batters=2 keeps the pool
+    near validation mean wickets (~12).
+    """
+    import duckdb
+    import numpy as np
+
+    from cric_rep_learn.fantasy.holdout_mc import reconstruct_holdout_matches
+
+    canonical = Path("artifacts/canonical")
+    deliveries = canonical / "deliveries.parquet"
+    if not deliveries.exists():
+        pytest.skip("canonical artifacts not present")
+
+    loose = reconstruct_holdout_matches(
+        canonical, splits=("validation",), max_matches=80, seed=7, min_batters=2
+    )
+    tight = reconstruct_holdout_matches(
+        canonical, splits=("validation",), max_matches=80, seed=7, min_batters=8
+    )
+    assert len(loose) == 80 and len(tight) == 80
+
+    def _mean_wickets(match_ids: list[str]) -> float:
+        con = duckdb.connect()
+        try:
+            row = con.execute(
+                """
+                SELECT AVG(w) FROM (
+                  SELECT match_id, SUM(bowler_wicket_count)::DOUBLE AS w
+                  FROM read_parquet(?)
+                  WHERE match_id IN (SELECT * FROM UNNEST(?))
+                    AND NOT is_super_over
+                    AND (is_legal OR extras_noballs > 0)
+                  GROUP BY 1
+                )
+                """,
+                [str(deliveries.resolve()), match_ids],
+            ).fetchone()
+        finally:
+            con.close()
+        return float(row[0])
+
+    loose_w = _mean_wickets([s.match_id for s in loose])
+    tight_w = _mean_wickets([s.match_id for s in tight])
+    # High facer threshold inflates wickets; loose pool should sit nearer ~12.
+    assert tight_w > loose_w + 1.5
+    assert loose_w < 13.5
+    assert np.isfinite(loose_w)
+
+
 def test_innings_expected_runs_reads_nested_team() -> None:
     """Chase targets must use team.expected_runs from simulate_innings."""
     from cric_rep_learn.fantasy.holdout_mc import _innings_expected_runs

@@ -47,7 +47,7 @@ def reconstruct_holdout_matches(
     match_ids: list[str] | None = None,
     max_matches: int = 100,
     seed: int = 7,
-    min_batters: int = 8,
+    min_batters: int = 2,
     min_bowlers: int = 5,
     attributes: dict[str, dict[str, Any]] | None = None,
     opportunity: str = "scheduled",
@@ -62,6 +62,11 @@ def reconstruct_holdout_matches(
       - ``actual``: include all bowlers who bowled; set ``max_overs`` from
         observed overs (capped at 4, padded/trimmed). Phase/death rules still
         schedule overs within those quotas.
+
+    ``min_batters`` counts batters who *faced* a ball (not full XI size). Default
+    2 avoids conditioning on deep collapses: requiring ≥8 facers per innings
+    selected ~15-wicket matches and made honest ~0.05/ball hazards look like
+    a ~0.74× under-rate. Lineups still pad to 11 from the match squad.
 
     Require ≥5 bowlers so quotas can cover 20 overs (max 4 each).
     """

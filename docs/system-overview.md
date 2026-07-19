@@ -195,10 +195,13 @@ Weights load from `artifacts/fantasy/scoring_weights.json`.
 4. Grid-search `BOWL_WICKET ∈ {25, 30, 35}` maximizing
    Spearman(pred, actual) + 0.25 × top-11 hit rate.
 
-**Latest plan-scale result (100 matches × 50 sims):** best `BOWL_WICKET = 25`,
-Spearman ≈ 0.078, top-11 hit ≈ 0.54 after MC haul/milestone tail scoring +
-spell overdispersion (was ≈ 0.055 post-allocation). Bowl-heavy / opportunity
-mismatch remain the main blind spots. Sample size alone will not fix ranking.
+**Latest plan-scale result (100 matches × 50 sims, after wicket-rate fix):**
+best `BOWL_WICKET = 35`, Spearman ≈ 0.33 / top-11 ≈ 0.63 on a
+**representative** holdout sample (faced-batter floor 2), with match wickets
+≈ 0.95× and pred/actual fantasy mean ≈ 0.98. Prior Spearman ≈ 0.43 was on a
+collapse-heavy sample (`min_batters=8` faced); same match IDs + mild
+`DISMISSAL_RATE_SCALE` still improve ranking. Bowl-heavy MAE and over-share
+remain the main blind spots.
 
 ### 8.3 Roles and credits
 

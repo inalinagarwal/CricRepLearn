@@ -26,6 +26,8 @@ Monte Carlo innings on hierarchical Bayes priors — the next step after
 - **Wicket load**: early collapses tilt rates down (fewer runs, more risk)
 - **Spell / form overdispersion**: mean-preserving Gamma shocks on bowler
   dismissal hazard and batter SR fatten multi-wicket hauls and big knocks
+- **Dismissal rate scale**: mild global `DISMISSAL_RATE_SCALE` (~1.10) closes
+  residual mean wicket under-prediction after holdout sample bias is removed
 - **Phases**: powerplay (0–35 legal balls), middle (36–95), death (96–119)
 - **Bowling allocation** (see below): cricket-aware quotas + pace/spin rules,
   with train **phase scores** (`wicket_rate / (sr + c)`) breaking ties

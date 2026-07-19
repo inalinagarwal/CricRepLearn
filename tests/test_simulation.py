@@ -482,6 +482,67 @@ def test_dismissal_spell_overdispersion_fattens_haul_tails() -> None:
     assert abs(fat_mean - thin_mean) / max(thin_mean, 1e-6) < 0.25
 
 
+def test_dismissal_rate_scale_lifts_mean_wickets() -> None:
+    """Global DISMISSAL_RATE_SCALE should raise expected wickets roughly in proportion."""
+    import cric_rep_learn.simulation.innings as innings_mod
+    from cric_rep_learn.simulation.attack import BowlerSpell
+    from cric_rep_learn.simulation.innings import simulate_innings
+
+    class _FakeRates:
+        def rates(self, **kwargs):  # type: ignore[no-untyped-def]
+            return {
+                "expected_sr": 1.15,
+                "dismissal_rate": 0.05,
+                "level": "fake",
+                "phase": kwargs.get("phase"),
+                "batting_hand": "right",
+                "bowling_arm": "right",
+            }
+
+    lineup = [
+        {"player_id": f"b{i}", "player_name": f"B{i}", "batting_hand": "right"}
+        for i in range(11)
+    ]
+    attack = [
+        BowlerSpell(
+            f"w{i}",
+            f"W{i}",
+            max_overs=4,
+            pace_group="pace",
+            phase_scores={"powerplay": 0.04, "middle": 0.04, "death": 0.04},
+        )
+        for i in range(5)
+    ]
+    old = innings_mod.DISMISSAL_RATE_SCALE
+    old_phi = innings_mod.DISMISSAL_SPELL_PHI
+    try:
+        innings_mod.DISMISSAL_SPELL_PHI = 0.0
+        innings_mod.DISMISSAL_RATE_SCALE = 1.0
+        base = simulate_innings(
+            lineup=lineup,
+            attack=attack,
+            rates=_FakeRates(),  # type: ignore[arg-type]
+            n_sims=120,
+            seed=9,
+        )
+        innings_mod.DISMISSAL_RATE_SCALE = 1.25
+        boosted = simulate_innings(
+            lineup=lineup,
+            attack=attack,
+            rates=_FakeRates(),  # type: ignore[arg-type]
+            n_sims=120,
+            seed=9,
+        )
+    finally:
+        innings_mod.DISMISSAL_RATE_SCALE = old
+        innings_mod.DISMISSAL_SPELL_PHI = old_phi
+
+    base_w = float(base["team"]["expected_wickets"])
+    boost_w = float(boosted["team"]["expected_wickets"])
+    assert boost_w > base_w * 1.08
+    assert boost_w < base_w * 1.45
+
+
 def test_phase_weights_sum() -> None:
     from cric_rep_learn.simulation.phase_score import DEFAULT_PHASE_WEIGHTS, summarize_phases
 

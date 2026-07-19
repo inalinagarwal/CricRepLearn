@@ -23,6 +23,11 @@ from cric_rep_learn.simulation.state import BatterInnings, InningsState
 # big-score tails without shifting ball-level mean rates.
 DISMISSAL_SPELL_PHI = 0.90
 BATTER_SR_PHI = 0.35
+# Mild mean lift on ball hazards. HB global dismiss ≈ 0.0535; holdout MC after
+# removing high-wicket sample bias still sat ~0.90× on match wickets (partnership
+# dampening + early chase truncations). Scale closes residual fantasy bowl gap
+# without reopening delivery-residual training.
+DISMISSAL_RATE_SCALE = 1.10
 
 
 def _sample_runs(rng: np.random.Generator, expected_sr: float) -> int:
@@ -159,6 +164,7 @@ def simulate_one_innings(
             float(ball_rates["dismissal_rate"])
             * tilt["dismiss_mult"]
             * dismiss_mult.get(bowler_id, 1.0)
+            * DISMISSAL_RATE_SCALE
         )
 
         # Wicket load: early collapses suppress SR and raise hazard.
@@ -422,6 +428,7 @@ def simulate_innings(
     method = (
         "Monte Carlo T20 innings on HB matchup priors + phase shrink + "
         "L/R handedness + partnership familiarity + wicket-load tilt; "
+        f"dismissal_rate_scale={DISMISSAL_RATE_SCALE:.2f}; "
         "mean-preserving spell dismissal / batter SR overdispersion for "
         "haul and big-score tails; "
         "per-over runs/wickets; PP/middle/death weighted score; "

@@ -77,6 +77,19 @@ def test_sample_runs_in_legal_set() -> None:
         assert _sample_runs(rng, 1.3) in {0, 1, 2, 4, 6}
 
 
+def test_sample_runs_mean_tracks_sr() -> None:
+    from cric_rep_learn.simulation.run_sampler import sample_runs
+
+    rng = np.random.default_rng(1)
+    table = {
+        "outcomes": [0, 1, 2, 4, 6],
+        "buckets": {"sr_1.4_1.8": [0.30, 0.30, 0.12, 0.18, 0.10]},
+    }
+    draws = [sample_runs(rng, 1.55, table=table) for _ in range(5000)]
+    assert abs(float(np.mean(draws)) - 1.55) < 0.3
+
+
+
 class _FakeRates(InningsRateModel):
     def __init__(self) -> None:  # noqa: D107
         pass

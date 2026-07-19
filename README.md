@@ -132,6 +132,10 @@ matchup lookup, HB player-effect vectors, co-batter peers,
 See [`docs/innings-simulation.md`](docs/innings-simulation.md) for the Monte
 Carlo T20 innings simulator (powerplay/middle/death, L/R, strike rotation).
 
+Fantasy XI: calibrate scoring on holdout box scores (`cric-calibrate-fantasy`),
+then optimize a constrained Dream XI (`cric-optimize-xi`) with auto roles,
+C/VC search, optional credit cap, and optional embedding tie-break only.
+
 See [`docs/project-guide.md`](docs/project-guide.md) for the complete product
 direction, code map, training guide, current limitations, and decisions that
 still need review.

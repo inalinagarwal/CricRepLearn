@@ -14,6 +14,9 @@ class BatterInnings:
     runs: float = 0.0
     balls: float = 0.0
     dismissals: float = 0.0
+    fours: float = 0.0
+    sixes: float = 0.0
+    dots: float = 0.0
     entered: bool = False
     out: bool = False
 
@@ -61,6 +64,9 @@ class InningsState:
                     "runs": b.runs,
                     "balls": b.balls,
                     "dismissals": b.dismissals,
+                    "fours": b.fours,
+                    "sixes": b.sixes,
+                    "dots": b.dots,
                     "entered": b.entered,
                     "out": b.out,
                 }

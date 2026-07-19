@@ -13,6 +13,7 @@ def pool_from_match(
     first_team: str,
     chase_team: str,
     roles: dict[str, str],
+    credits: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Map one toss scenario to a 22-player fantasy pool.
@@ -21,6 +22,7 @@ def pool_from_match(
     First-innings batters + chase bowlers are ``first_team`` contributors;
     chase batters + first-innings bowlers are ``chase_team``.
     """
+    credits = credits or {}
     first = match_result["first_innings"]
     chase = match_result["chase_innings"]
     bat_first = {b["player_id"]: b for b in first["batters"]}
@@ -28,7 +30,6 @@ def pool_from_match(
     bowl_first = {b["player_id"]: b for b in first["bowlers"]}
     bowl_chase = {b["player_id"]: b for b in chase["bowlers"]}
 
-    # All unique players across both lineups.
     players: dict[str, dict[str, Any]] = {}
     for row in match_result.get("context", {}).get("first_batters") or []:
         players[row["player_id"]] = {
@@ -42,7 +43,6 @@ def pool_from_match(
             "player_name": row["player_name"],
             "team": chase_team,
         }
-    # Ensure bowlers appear even if not in bat list (shouldn't happen for XI).
     for src, team in ((bowl_first, chase_team), (bowl_chase, first_team)):
         for pid, b in src.items():
             if pid not in players:
@@ -67,6 +67,7 @@ def pool_from_match(
                 role=role.upper(),
                 batting=batting,
                 bowling=bowling,
+                credits=credits.get(pid),
             )
         )
     pool.sort(key=lambda r: -r["fantasy_points"])
@@ -77,13 +78,16 @@ def pool_average_tosses(
     scenarios: list[tuple[dict[str, Any], str, str]],
     *,
     roles: dict[str, str],
+    credits: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     """
     ``scenarios`` = list of (match_result, first_team, chase_team).
     Average fantasy points across toss outcomes.
     """
     pools = [
-        pool_from_match(result, first_team=ft, chase_team=ct, roles=roles)
+        pool_from_match(
+            result, first_team=ft, chase_team=ct, roles=roles, credits=credits
+        )
         for result, ft, ct in scenarios
     ]
     return average_player_pools(pools)

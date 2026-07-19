@@ -1,15 +1,11 @@
-"""Constrained fantasy XI optimizer with venue role tilt."""
+"""Constrained fantasy XI optimizer with venue tilt and C/VC search."""
 
 from __future__ import annotations
 
 import itertools
 from typing import Any
 
-from cric_rep_learn.fantasy.scoring import (
-    BALANCE_PENALTY_PER_SLOT,
-    CAPTAIN_MULT,
-    VICE_MULT,
-)
+from cric_rep_learn.fantasy.scoring import W, load_scoring_weights
 
 
 DEFAULT_CONSTRAINTS = {
@@ -21,6 +17,7 @@ DEFAULT_CONSTRAINTS = {
     "min_ar": 1,
     "max_bat": 5,
     "max_bowl": 5,
+    "max_credits": None,
 }
 
 DEFAULT_TARGET_ROLES = {"WK": 1, "BAT": 4, "AR": 2, "BOWL": 4}
@@ -29,17 +26,20 @@ DEFAULT_TARGET_ROLES = {"WK": 1, "BAT": 4, "AR": 2, "BOWL": 4}
 def _counts(xi: list[dict[str, Any]]) -> dict[str, Any]:
     roles = {"WK": 0, "BAT": 0, "AR": 0, "BOWL": 0}
     teams: dict[str, int] = {}
+    credits = 0.0
     for row in xi:
         role = str(row["role"]).upper()
         roles[role] = roles.get(role, 0) + 1
         teams[row["team"]] = teams.get(row["team"], 0) + 1
-    return {"roles": roles, "teams": teams}
+        if row.get("credits") is not None:
+            credits += float(row["credits"])
+    return {"roles": roles, "teams": teams, "credits_used": credits}
 
 
 def is_legal(
     xi: list[dict[str, Any]],
     *,
-    constraints: dict[str, int] | None = None,
+    constraints: dict[str, Any] | None = None,
 ) -> bool:
     c = {**DEFAULT_CONSTRAINTS, **(constraints or {})}
     if len(xi) != c["xi_size"]:
@@ -60,6 +60,9 @@ def is_legal(
         return False
     if roles.get("BOWL", 0) > c.get("max_bowl", 99):
         return False
+    max_credits = c.get("max_credits")
+    if max_credits is not None and counts["credits_used"] > float(max_credits) + 1e-6:
+        return False
     return True
 
 
@@ -71,63 +74,79 @@ def balance_penalty(
     xi: list[dict[str, Any]],
     *,
     target_roles: dict[str, int] | None = None,
-    penalty_per_slot: float = BALANCE_PENALTY_PER_SLOT,
+    penalty_per_slot: float | None = None,
 ) -> float:
-    """L1 distance from target WK-BAT-AR-BOWL mix."""
+    if penalty_per_slot is None:
+        penalty_per_slot = W("BALANCE_PENALTY_PER_SLOT")
     target = {**DEFAULT_TARGET_ROLES, **(target_roles or {})}
     roles = _counts(xi)["roles"]
     dist = 0
     for role in ("WK", "BAT", "AR", "BOWL"):
         dist += abs(int(roles.get(role, 0)) - int(target.get(role, 0)))
-    # Each mis-slot is counted twice in a pure L1 over a fixed sum — use half.
     return float((dist / 2.0) * penalty_per_slot)
 
 
 def assign_captain_vice(
     xi: list[dict[str, Any]],
+    *,
+    captain_candidates: int = 5,
 ) -> dict[str, Any]:
-    """C = highest points, VC = second; team score with multipliers."""
+    """Search C/VC among top-N scorers in the XI."""
+    load_scoring_weights()
+    c_mult = W("CAPTAIN_MULT")
+    v_mult = W("VICE_MULT")
     ranked = sorted(xi, key=lambda p: -float(p["fantasy_points"]))
-    captain = ranked[0]
-    vice = ranked[1]
-    total = 0.0
-    for player in xi:
-        pts = float(player["fantasy_points"])
-        if player["player_id"] == captain["player_id"]:
-            total += pts * CAPTAIN_MULT
-        elif player["player_id"] == vice["player_id"]:
-            total += pts * VICE_MULT
-        else:
-            total += pts
-    return {
-        "captain": {
-            "player_id": captain["player_id"],
-            "player_name": captain["player_name"],
-            "fantasy_points": captain["fantasy_points"],
-            "multiplier": CAPTAIN_MULT,
-        },
-        "vice_captain": {
-            "player_id": vice["player_id"],
-            "player_name": vice["player_name"],
-            "fantasy_points": vice["fantasy_points"],
-            "multiplier": VICE_MULT,
-        },
-        "xi_points_raw": xi_base_points(xi),
-        "xi_points_with_cv": float(total),
-    }
+    n = min(max(int(captain_candidates), 2), len(ranked))
+    candidates = ranked[:n]
+    best: dict[str, Any] | None = None
+    for i, captain in enumerate(candidates):
+        for j, vice in enumerate(candidates):
+            if i == j:
+                continue
+            total = 0.0
+            for player in xi:
+                pts = float(player["fantasy_points"])
+                if player["player_id"] == captain["player_id"]:
+                    total += pts * c_mult
+                elif player["player_id"] == vice["player_id"]:
+                    total += pts * v_mult
+                else:
+                    total += pts
+            row = {
+                "captain": {
+                    "player_id": captain["player_id"],
+                    "player_name": captain["player_name"],
+                    "fantasy_points": captain["fantasy_points"],
+                    "multiplier": c_mult,
+                },
+                "vice_captain": {
+                    "player_id": vice["player_id"],
+                    "player_name": vice["player_name"],
+                    "fantasy_points": vice["fantasy_points"],
+                    "multiplier": v_mult,
+                },
+                "xi_points_raw": xi_base_points(xi),
+                "xi_points_with_cv": float(total),
+                "captain_candidates": n,
+            }
+            if best is None or row["xi_points_with_cv"] > best["xi_points_with_cv"]:
+                best = row
+    assert best is not None
+    return best
 
 
 def optimize_xi(
     pool: list[dict[str, Any]],
     *,
-    constraints: dict[str, int] | None = None,
+    constraints: dict[str, Any] | None = None,
     target_roles: dict[str, int] | None = None,
     top_k: int = 5,
-    balance_penalty_per_slot: float = BALANCE_PENALTY_PER_SLOT,
+    balance_penalty_per_slot: float | None = None,
+    captain_candidates: int = 5,
 ) -> dict[str, Any]:
-    """
-    Enumerate legal XIs and rank by C/VC score minus venue-balance penalty.
-    """
+    load_scoring_weights()
+    if balance_penalty_per_slot is None:
+        balance_penalty_per_slot = W("BALANCE_PENALTY_PER_SLOT")
     c = {**DEFAULT_CONSTRAINTS, **(constraints or {})}
     target = {**DEFAULT_TARGET_ROLES, **(target_roles or {})}
     n = len(pool)
@@ -157,7 +176,7 @@ def optimize_xi(
         if not is_legal(xi, constraints=c):
             continue
         legal += 1
-        cv = assign_captain_vice(xi)
+        cv = assign_captain_vice(xi, captain_candidates=captain_candidates)
         penalty = balance_penalty(
             xi, target_roles=target, penalty_per_slot=balance_penalty_per_slot
         )
@@ -170,6 +189,7 @@ def optimize_xi(
                     "team": p["team"],
                     "role": p["role"],
                     "fantasy_points": p["fantasy_points"],
+                    "credits": p.get("credits"),
                 }
                 for p in sorted(xi, key=lambda x: -x["fantasy_points"])
             ],
@@ -196,8 +216,8 @@ def optimize_xi(
         "best_xi": best[0],
         "top_xis": best,
         "method": (
-            "Enumerate C(n,11) under max-from-team + role min/max; "
-            "rank by C/VC points − venue balance penalty; "
-            "C=top scorer ×2, VC=2nd ×1.5"
+            "Enumerate C(n,11) under max-from-team + role min/max + optional credits; "
+            f"C/VC search over top-{captain_candidates}; "
+            "rank by C/VC points − venue balance penalty"
         ),
     }

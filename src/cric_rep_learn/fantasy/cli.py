@@ -11,8 +11,11 @@ from typing import Any
 import pyarrow.parquet as pq
 
 from cric_rep_learn.data.player_attributes import load_attributes_index
+from cric_rep_learn.fantasy.embeddings_tiebreak import apply_embedding_tiebreak
 from cric_rep_learn.fantasy.optimize import optimize_xi
 from cric_rep_learn.fantasy.pool import pool_average_tosses
+from cric_rep_learn.fantasy.roles import resolve_squad_roles
+from cric_rep_learn.fantasy.scoring import load_scoring_weights
 from cric_rep_learn.fantasy.venue_tilt import venue_scoring_profile
 from cric_rep_learn.players.card import resolve_player
 from cric_rep_learn.simulation.attack import (
@@ -83,18 +86,6 @@ def _resolve_attack(names, aliases, attributes, *, canonical_dir: Path):
     return attach_phase_profiles(attack, profiles)
 
 
-def _role_ids(
-    role_by_name: dict[str, str],
-    aliases,
-    attributes,
-) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for name, role in role_by_name.items():
-        resolved = resolve_player(name, aliases, attributes=attributes)
-        out[resolved["player_id"]] = role
-    return out
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--team-a-name", default="IND")
@@ -105,8 +96,25 @@ def main() -> None:
     parser.add_argument("--team-b-bowlers", required=True, help="5 bowlers from team B")
     parser.add_argument(
         "--roles",
-        required=True,
-        help="Comma list Name:ROLE for all 22 (WK/BAT/AR/BOWL)",
+        default=None,
+        help="Optional overrides Name:ROLE (WK/BAT/AR/BOWL). Auto-inferred if omitted.",
+    )
+    parser.add_argument(
+        "--captain-candidates",
+        type=int,
+        default=5,
+        help="Search C/VC among top-N fantasy scorers in the XI (default 5)",
+    )
+    parser.add_argument(
+        "--max-credits",
+        type=float,
+        default=None,
+        help="Optional credit cap (e.g. 100); uses role-based credit proxies",
+    )
+    parser.add_argument(
+        "--embedding-tiebreak",
+        action="store_true",
+        help="Optional HB⊕embedding garnish when ranking near-tied pool points",
     )
     parser.add_argument("--venue", default=None)
     parser.add_argument("--date", default=None)
@@ -141,12 +149,23 @@ def main() -> None:
         type=Path,
         default=Path("artifacts/co-batters/co_batters.parquet"),
     )
+    parser.add_argument(
+        "--scoring-weights",
+        type=Path,
+        default=Path("artifacts/fantasy/scoring_weights.json"),
+    )
+    parser.add_argument(
+        "--embeddings",
+        type=Path,
+        default=Path("artifacts/embeddings-residual-mps-user/player_embeddings.parquet"),
+    )
     args = parser.parse_args()
+
+    load_scoring_weights(args.scoring_weights if args.scoring_weights.exists() else None)
 
     aliases = pq.read_table(args.canonical / "player_aliases.parquet").to_pandas()
     attributes = load_attributes_index(args.attributes)
-    role_by_name = _parse_roles(args.roles)
-    roles = _role_ids(role_by_name, aliases, attributes)
+    overrides = _parse_roles(args.roles) if args.roles else {}
 
     a_bat = _resolve_lineup(_parse_names(args.team_a_batters), aliases, attributes)
     b_bat = _resolve_lineup(_parse_names(args.team_b_batters), aliases, attributes)
@@ -157,12 +176,21 @@ def main() -> None:
         _parse_names(args.team_b_bowlers), aliases, attributes, canonical_dir=args.canonical
     )
 
-    missing = []
-    for row in a_bat + b_bat:
-        if row["player_id"] not in roles:
-            missing.append(row["query"])
-    if missing:
-        parser.error(f"--roles missing entries for: {missing}")
+    attack_ids = {b.player_id for b in a_bowl + b_bowl}
+    squad = a_bat + b_bat
+    # Attach batting order within each team for role inference.
+    for i, row in enumerate(a_bat):
+        row["batting_order"] = i + 1
+    for i, row in enumerate(b_bat):
+        row["batting_order"] = i + 1
+    role_info = resolve_squad_roles(
+        squad,
+        attributes=attributes,
+        attack_ids=attack_ids,
+        overrides=overrides,
+    )
+    roles = {pid: info["role"] for pid, info in role_info.items()}
+    credits = {pid: info["credits"] for pid, info in role_info.items()}
 
     def rates(group: str) -> InningsRateModel:
         return InningsRateModel(
@@ -179,7 +207,6 @@ def main() -> None:
     chase_impacts = load_chase_impacts(args.chase_impacts, canonical_dir=args.canonical)
     partnership_index = load_partnership_index(args.co_batters)
 
-    # Toss A: team A bats first
     print("simulating toss A (team A bat first)...", file=sys.stderr)
     toss_a = simulate_match(
         first_lineup=a_bat,
@@ -200,7 +227,6 @@ def main() -> None:
         "chase_bowlers": [{"player_id": b.player_id, "player_name": b.player_name} for b in a_bowl],
     }
 
-    # Toss B: team B bats first
     print("simulating toss B (team B bat first)...", file=sys.stderr)
     toss_b = simulate_match(
         first_lineup=b_bat,
@@ -227,32 +253,55 @@ def main() -> None:
             (toss_b, args.team_b_name, args.team_a_name),
         ],
         roles=roles,
+        credits=credits,
     )
+    if args.embedding_tiebreak:
+        pool = apply_embedding_tiebreak(
+            pool,
+            effects_path=args.effects,
+            embeddings_path=args.embeddings,
+        )
+
     venue_profile = venue_scoring_profile(args.canonical, args.venue)
     constraints = {
         "max_from_team": args.max_from_team,
         **venue_profile.get("constraints", {}),
     }
+    if args.max_credits is not None:
+        constraints["max_credits"] = args.max_credits
     opt = optimize_xi(
         pool,
         constraints=constraints,
         target_roles=venue_profile.get("target_roles"),
         top_k=args.top_k,
+        captain_candidates=args.captain_candidates,
     )
     result: dict[str, Any] = {
         "venue": args.venue,
         "match_date": args.date,
         "venue_profile": venue_profile,
+        "role_resolution": {
+            pid: {
+                "player_name": next(
+                    (p["player_name"] for p in squad if p["player_id"] == pid), pid
+                ),
+                **info,
+            }
+            for pid, info in role_info.items()
+        },
         "toss_average": True,
         "toss_a_match": toss_a["match"],
         "toss_b_match": toss_b["match"],
         "player_pool": pool,
         "optimized": opt,
         "scoring": {
-            "bat": "1/run + milestones 30/50/100 + SR tilt",
-            "bowl": "30/wicket + haul bonuses + economy vs 7.5",
-            "captain": "×2 top scorer, ×1.5 second",
+            "weights": str(args.scoring_weights),
+            "bat": "1/run + boundary 4/6 + milestones + SR tilt",
+            "bowl": f"{load_scoring_weights().get('BOWL_WICKET', 30)}/wicket + hauls + economy",
+            "captain": f"C/VC search over top-{args.captain_candidates}",
             "balance": "soft penalty vs venue target WK-BAT-AR-BOWL mix",
+            "credits": args.max_credits,
+            "embedding_tiebreak": bool(args.embedding_tiebreak),
         },
     }
     print(json.dumps(result, indent=2))

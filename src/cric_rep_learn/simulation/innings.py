@@ -16,27 +16,13 @@ from cric_rep_learn.simulation.partnership import partnership_tilt
 from cric_rep_learn.simulation.phase import t20_phase
 from cric_rep_learn.simulation.phase_score import phase_for_over, summarize_phases
 from cric_rep_learn.simulation.priors import InningsRateModel
+from cric_rep_learn.simulation.run_sampler import sample_runs
 from cric_rep_learn.simulation.state import BatterInnings, InningsState
 
 
 def _sample_runs(rng: np.random.Generator, expected_sr: float) -> int:
-    """Discrete run sample with mean ≈ expected_sr (0/1/2/4/6 only)."""
-    sr = float(max(0.05, min(expected_sr, 3.0)))
-    p0, p1, p2, p4, p6 = 0.38, 0.36, 0.10, 0.10, 0.06
-    tilt = (sr - 1.2) * 0.12
-    p4 = max(0.02, p4 + tilt)
-    p6 = max(0.01, p6 + tilt * 0.7)
-    p0 = max(0.15, p0 - tilt * 0.6)
-    p1 = max(0.15, p1 - tilt * 0.3)
-    total = p0 + p1 + p2 + p4 + p6
-    probs = np.array([p0, p1, p2, p4, p6], dtype=np.float64) / total
-    draws = rng.choice([0, 1, 2, 4, 6], p=probs)
-    mean = float(np.dot(probs, [0, 1, 2, 4, 6]))
-    if mean < sr - 0.15 and draws in (0, 1) and rng.random() < min(0.45, sr - mean):
-        draws = 4 if rng.random() < 0.55 else 6
-    elif mean > sr + 0.25 and draws in (4, 6) and rng.random() < min(0.45, mean - sr):
-        draws = 1 if rng.random() < 0.7 else 0
-    return int(draws)
+    """Backward-compatible wrapper around train-calibrated sampler."""
+    return sample_runs(rng, expected_sr)
 
 
 def _new_state(lineup: list[dict[str, str]]) -> InningsState:
@@ -192,6 +178,12 @@ def simulate_one_innings(
 
         runs = _sample_runs(rng, ball_rates["expected_sr"])
         striker.runs += runs
+        if runs == 0:
+            striker.dots += 1.0
+        elif runs == 4:
+            striker.fours += 1.0
+        elif runs == 6:
+            striker.sixes += 1.0
         figures["runs"] += runs
         current_over["runs"] += runs
         state.score += runs
@@ -258,6 +250,8 @@ def simulate_innings(
     confidences: list[float] = []
     batter_runs: dict[str, list[float]] = {row["player_id"]: [] for row in lineup}
     batter_balls: dict[str, list[float]] = {row["player_id"]: [] for row in lineup}
+    batter_fours: dict[str, list[float]] = {row["player_id"]: [] for row in lineup}
+    batter_sixes: dict[str, list[float]] = {row["player_id"]: [] for row in lineup}
     bowler_wickets: dict[str, list[float]] = {b.player_id: [] for b in attack}
     bowler_runs: dict[str, list[float]] = {b.player_id: [] for b in attack}
     bowler_balls: dict[str, list[float]] = {b.player_id: [] for b in attack}
@@ -297,6 +291,8 @@ def simulate_innings(
         for batter in result["batters"]:
             batter_runs[batter["player_id"]].append(batter["runs"])
             batter_balls[batter["player_id"]].append(batter["balls"])
+            batter_fours[batter["player_id"]].append(float(batter.get("fours") or 0.0))
+            batter_sixes[batter["player_id"]].append(float(batter.get("sixes") or 0.0))
         for bowler in result["bowlers"]:
             pid = bowler["player_id"]
             bowler_wickets[pid].append(float(bowler["wickets"]))
@@ -308,6 +304,8 @@ def simulate_innings(
         pid = row["player_id"]
         br = np.asarray(batter_runs[pid], dtype=np.float64)
         bb = np.asarray(batter_balls[pid], dtype=np.float64)
+        bf = np.asarray(batter_fours[pid], dtype=np.float64)
+        bs = np.asarray(batter_sixes[pid], dtype=np.float64)
         batter_summary.append(
             {
                 "player_id": pid,
@@ -318,6 +316,8 @@ def simulate_innings(
                 "runs_p50": float(np.quantile(br, 0.50)),
                 "runs_p90": float(np.quantile(br, 0.90)),
                 "expected_balls": float(bb.mean()),
+                "expected_fours": float(bf.mean()),
+                "expected_sixes": float(bs.mean()),
                 "p_batted": float(np.mean(bb > 0)),
             }
         )

@@ -168,3 +168,15 @@ Once archetype baselines are measured, train representations so that:
 3. A no-player ablation clearly loses.
 
 That is the embedding success criterion for Dream11-facing features.
+
+## Fantasy XI and embeddings (garnish only)
+
+Fantasy scoring is calibrated on holdout reconstructed box scores
+(`cric-calibrate-fantasy` → `artifacts/fantasy/scoring_weights.json`).
+Captain/vice search looks over the top-N scorers in a legal XI.
+
+Neural batting embeddings are **not** the rate engine. After HB Monte Carlo
+produces expected fantasy points, an optional HB effect ⊕ batting-embedding
+vector may be used only as a **tie-break** when two players are within a small
+points epsilon (`--embedding-tiebreak` on `cric-optimize-xi`). Do not reopen
+delivery-residual or contribution training for fantasy ranking.

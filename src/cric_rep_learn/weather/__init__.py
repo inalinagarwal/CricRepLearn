@@ -324,7 +324,18 @@ def build_match_weather(
 
     daily_frames: list[pd.DataFrame] = []
     errors: list[dict[str, Any]] = []
+    existing_daily = pd.DataFrame()
+    existing_path = output_dir / "weather_daily.parquet"
+    have_keys: set[str] = set()
+    if existing_path.exists():
+        existing_daily = pq.read_table(existing_path).to_pandas()
+        if "loc_key" in existing_daily.columns and not existing_daily.empty:
+            have_keys = set(existing_daily["loc_key"].astype(str).unique())
+
     for row in loc_groups.to_dict(orient="records"):
+        loc_key = str(row["loc_key"])
+        if loc_key in have_keys:
+            continue
         try:
             frame = fetch_daily_weather(
                 latitude=float(row["latitude"]),
@@ -336,13 +347,23 @@ def build_match_weather(
             )
             if frame.empty:
                 continue
-            frame["loc_key"] = row["loc_key"]
+            frame["loc_key"] = loc_key
             daily_frames.append(frame)
+            have_keys.add(loc_key)
         except Exception as exc:  # noqa: BLE001
-            errors.append({"loc_key": row["loc_key"], "error": str(exc)})
+            errors.append({"loc_key": loc_key, "error": str(exc)})
 
-    daily = pd.concat(daily_frames, ignore_index=True) if daily_frames else pd.DataFrame()
+    parts = []
+    if not existing_daily.empty:
+        parts.append(existing_daily)
+    parts.extend(daily_frames)
+    daily = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
     if not daily.empty:
+        # Drop duplicate loc_key×date if a retry re-fetched.
+        if {"loc_key", "weather_date"}.issubset(daily.columns):
+            daily = daily.drop_duplicates(
+                subset=["loc_key", "weather_date"], keep="last"
+            )
         pq.write_table(
             pa.Table.from_pandas(daily, preserve_index=False),
             output_dir / "weather_daily.parquet",

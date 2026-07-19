@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import pytest
+import numpy as np
+
 from cric_rep_learn.simulation.attack import BowlerSpell, build_over_schedule
 from cric_rep_learn.simulation.phase import t20_phase
 from cric_rep_learn.simulation.innings import _sample_runs, simulate_one_innings
 from cric_rep_learn.simulation.priors import InningsRateModel
-import numpy as np
 
 
 def test_t20_phase_cutoffs() -> None:
@@ -113,3 +115,92 @@ def test_one_innings_finishes() -> None:
     assert result["balls"] <= 120
     assert result["wickets"] <= 10
     assert result["finish_reason"] in {"overs_complete", "all_out", "incomplete"}
+    assert "bowlers" in result
+    assert "overs" in result
+    assert sum(b["wickets"] for b in result["bowlers"]) == result["wickets"]
+    assert sum(b["balls"] for b in result["bowlers"]) == result["balls"]
+    assert abs(sum(b["runs"] for b in result["bowlers"]) - result["runs"]) < 1e-6
+    assert abs(sum(o["runs"] for o in result["overs"]) - result["runs"]) < 1e-6
+    assert abs(sum(o["wickets"] for o in result["overs"]) - result["wickets"]) < 1e-6
+    assert all("partnership" in o for o in result["overs"])
+
+
+def test_phase_weights_sum() -> None:
+    from cric_rep_learn.simulation.phase_score import DEFAULT_PHASE_WEIGHTS, summarize_phases
+
+    assert abs(sum(DEFAULT_PHASE_WEIGHTS.values()) - 1.0) < 1e-9
+    overs = [
+        {"over": i, "phase": "powerplay" if i < 6 else ("death" if i >= 16 else "middle"),
+         "expected_runs": 8.0, "expected_wickets": 0.2}
+        for i in range(20)
+    ]
+    phases = summarize_phases(overs)
+    assert phases["powerplay"]["expected_runs"] == pytest.approx(48.0)
+    assert phases["middle"]["expected_runs"] == pytest.approx(80.0)
+    assert phases["death"]["expected_runs"] == pytest.approx(32.0)
+    assert phases["phase_weighted_score"] > 0
+
+
+def test_chase_pressure_tilts_and_stops_at_target() -> None:
+    from cric_rep_learn.simulation.chase import apply_chase_pressure
+
+    impacts = {
+        "cells": {
+            "rr_2_2.5|w0_2": {
+                "sr_mult": 1.2,
+                "dismiss_mult": 1.3,
+                "win_confidence": 0.2,
+            }
+        },
+        "rrr_marginal": {},
+    }
+    pressed = apply_chase_pressure(
+        sr=1.0,
+        dismissal_rate=0.05,
+        target=150,
+        score=20,
+        legal_balls=60,
+        wickets=1,
+        impacts=impacts,
+    )
+    assert pressed["required_rate"] == pytest.approx(130 / 60)
+    assert pressed["expected_sr"] > 1.0
+    assert pressed["dismissal_rate"] > 0.05
+    assert pressed["win_confidence"] == 0.2
+
+    lineup = [
+        {"player_id": f"b{i}", "player_name": f"B{i}", "batting_hand": "left"}
+        for i in range(11)
+    ]
+    attack = [
+        BowlerSpell(
+            f"w{i}",
+            f"W{i}",
+            max_overs=4,
+            phase_scores={"powerplay": 0.04, "middle": 0.04, "death": 0.04},
+        )
+        for i in range(5)
+    ]
+
+    class _Easy(_FakeRates):
+        def rates(self, **kwargs):  # type: ignore[no-untyped-def]
+            return {
+                "expected_sr": 2.5,
+                "dismissal_rate": 0.01,
+                "level": "fake",
+                "phase": kwargs.get("phase"),
+                "batting_hand": "left",
+                "bowling_arm": "right",
+            }
+
+    result = simulate_one_innings(
+        lineup=lineup,
+        attack=attack,
+        rates=_Easy(),  # type: ignore[arg-type]
+        rng=np.random.default_rng(2),
+        target=40.0,
+        chase_impacts=impacts,
+    )
+    assert result["finish_reason"] == "target_reached"
+    assert result["chase_won"] is True
+    assert result["runs"] >= 40

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,9 @@ from cric_rep_learn.simulation.attack import (
     attach_phase_profiles,
     load_bowler_phase_profiles,
 )
+from cric_rep_learn.simulation.chase import load_chase_impacts
 from cric_rep_learn.simulation.innings import simulate_innings
+from cric_rep_learn.simulation.partnership import load_partnership_index
 from cric_rep_learn.simulation.priors import InningsRateModel
 
 
@@ -73,12 +76,18 @@ def main() -> None:
     parser.add_argument(
         "--batters",
         required=True,
-        help='Batting order, e.g. "Chris Gayle,E Lewis,AD Russell,KA Pollard,..."',
+        help=(
+            "Full batting order (typically 11). Lower-order players contribute "
+            "fewer expected runs but still add to the team total."
+        ),
     )
     parser.add_argument(
         "--bowlers",
         required=True,
-        help='Bowling attack, e.g. "JJ Bumrah,B Kumar,R Ashwin,YS Chahal,HH Pandya"',
+        help=(
+            "Bowling attack (typically 5 × max 4 overs = 20). "
+            'e.g. "JJ Bumrah,B Kumar,R Ashwin,YS Chahal,HH Pandya"'
+        ),
     )
     parser.add_argument(
         "--venue",
@@ -90,6 +99,21 @@ def main() -> None:
         choices=["first", "chase"],
         default="first",
         help="Batting first or chasing (default first)",
+    )
+    parser.add_argument(
+        "--target",
+        type=float,
+        default=None,
+        help=(
+            "Chase target (runs to win). Enables RRR×wickets pressure and "
+            "empirical chase win-confidence; innings stops when reached."
+        ),
+    )
+    parser.add_argument(
+        "--chase-impacts",
+        type=Path,
+        default=Path("artifacts/baselines/chase_impacts.json"),
+        help="Chase pressure table (built from train if missing)",
     )
     parser.add_argument(
         "--date",
@@ -120,6 +144,12 @@ def main() -> None:
         type=Path,
         default=Path("artifacts/player-effects/batter_bowler_matchups.parquet"),
     )
+    parser.add_argument(
+        "--co-batters",
+        type=Path,
+        default=Path("artifacts/co-batters/co_batters.parquet"),
+        help="Co-batter partnership graph for familiarity tilts",
+    )
     args = parser.parse_args()
 
     aliases = pq.read_table(args.canonical / "player_aliases.parquet").to_pandas()
@@ -128,6 +158,24 @@ def main() -> None:
     attack = _resolve_attack(
         _parse_names(args.bowlers), aliases, attributes, canonical_dir=args.canonical
     )
+    if len(lineup) < 11:
+        print(
+            f"note: {len(lineup)} batters supplied; prefer the full XI (11) "
+            "so lower-order contributions enter the team total",
+            file=sys.stderr,
+        )
+    if len(attack) != 5:
+        print(
+            f"note: {len(attack)} bowlers supplied; typical T20 attack is 5 "
+            "(4 overs each)",
+            file=sys.stderr,
+        )
+    if sum(b.max_overs for b in attack) < 20:
+        parser.error(
+            f"attack max overs sum to {sum(b.max_overs for b in attack)}; need ≥20"
+        )
+    if args.target is not None and args.innings != "chase":
+        parser.error("--target requires --innings chase")
     innings_group = "first_innings" if args.innings == "first" else "chase"
     rates = InningsRateModel(
         canonical_dir=args.canonical,
@@ -139,8 +187,21 @@ def main() -> None:
         match_date=args.date,
         weather_dir=args.weather if args.date else None,
     )
+    chase_impacts = None
+    if args.target is not None:
+        chase_impacts = load_chase_impacts(
+            args.chase_impacts, canonical_dir=args.canonical
+        )
+    partnership_index = load_partnership_index(args.co_batters)
     result = simulate_innings(
-        lineup=lineup, attack=attack, rates=rates, n_sims=args.sims, seed=args.seed
+        lineup=lineup,
+        attack=attack,
+        rates=rates,
+        n_sims=args.sims,
+        seed=args.seed,
+        target=args.target,
+        chase_impacts=chase_impacts,
+        partnership_index=partnership_index,
     )
     result["lineup"] = lineup
     result["context"] = {
@@ -148,6 +209,7 @@ def main() -> None:
         "venue_scope": rates.venue_scope,
         "innings": args.innings,
         "innings_group": innings_group,
+        "target": args.target,
         "match_date": args.date,
         "weather": rates.weather_features,
         "weather_notes": rates.weather_notes,

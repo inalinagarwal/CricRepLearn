@@ -175,22 +175,28 @@ def evaluate_baselines(
 
         oracle_pts = None
         if include_oracle:
-            oracle = pick_oracle_xi(pool, actual_points=actual_points)
-            oracle_pts = score_xi_actual(
-                oracle["players"],
-                actual_points=actual_points,
-                captain_id=oracle["captain_id"],
-                vice_id=oracle["vice_id"],
-            )
+            try:
+                oracle = pick_oracle_xi(pool, actual_points=actual_points)
+                oracle_pts = score_xi_actual(
+                    oracle["players"],
+                    actual_points=actual_points,
+                    captain_id=oracle["captain_id"],
+                    vice_id=oracle["vice_id"],
+                )
+            except RuntimeError:
+                oracle_pts = None
 
         for name in chosen:
             fn = BASELINE_STRATEGIES[name]
-            if name == "random":
-                pick = fn(pool, seed=seed + hash(mid) % 10_000)
-            elif name == "credits_value":
-                pick = fn(pool, max_credits=max_credits)
-            else:
-                pick = fn(pool)
+            try:
+                if name == "random":
+                    pick = fn(pool, seed=seed + hash(mid) % 10_000)
+                elif name == "credits_value":
+                    pick = fn(pool, max_credits=max_credits)
+                else:
+                    pick = fn(pool)
+            except RuntimeError:
+                continue
             selected_ids = {p["player_id"] for p in pick["players"]}
             actual_pts = score_xi_actual(
                 pick["players"],

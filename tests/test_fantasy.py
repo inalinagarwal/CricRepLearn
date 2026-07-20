@@ -657,3 +657,118 @@ def test_bowler_wicket_prior_multiplier() -> None:
     vals = list(priors.values())
     assert all(0.75 <= v <= 1.35 for v in vals)
     assert max(vals) > 1.0 and min(vals) < 1.0
+
+
+def test_optimize_uses_role_composition_for_large_pools() -> None:
+    pool = []
+    for i in range(2):
+        pool.append(
+            merge_player_points(
+                player_id=f"wk{i}",
+                player_name=f"WK{i}",
+                team="A" if i == 0 else "B",
+                role="WK",
+                batting={"expected_runs": 30 + i, "expected_balls": 20},
+                credits=8.5,
+            )
+        )
+    for i in range(8):
+        pool.append(
+            merge_player_points(
+                player_id=f"bat{i}",
+                player_name=f"BAT{i}",
+                team="A" if i < 4 else "B",
+                role="BAT",
+                batting={"expected_runs": 40 - i, "expected_balls": 25},
+                credits=9.0,
+            )
+        )
+    for i in range(4):
+        pool.append(
+            merge_player_points(
+                player_id=f"ar{i}",
+                player_name=f"AR{i}",
+                team="A" if i < 2 else "B",
+                role="AR",
+                batting={"expected_runs": 15, "expected_balls": 12},
+                bowling={
+                    "expected_wickets": 1.0,
+                    "expected_overs": 3.0,
+                    "expected_economy": 7.0,
+                },
+                credits=8.5,
+            )
+        )
+    for i in range(8):
+        pool.append(
+            merge_player_points(
+                player_id=f"bowl{i}",
+                player_name=f"BOWL{i}",
+                team="A" if i < 4 else "B",
+                role="BOWL",
+                bowling={
+                    "expected_wickets": 1.5 - 0.05 * i,
+                    "expected_overs": 4.0,
+                    "expected_economy": 7.5,
+                },
+                credits=8.5,
+            )
+        )
+    assert len(pool) == 22
+    result = optimize_xi(pool, top_k=1, captain_candidates=3)
+    assert result["search"] == "role_composition"
+    # C(22,11) = 705432; pruned role search should be far smaller.
+    assert result["combinations_checked"] < 150_000
+    assert result["cv_candidates"] <= 250
+    assert is_legal(result["best_xi"]["players"])
+
+
+def test_fantasy_uncertainty_quantiles() -> None:
+    row = merge_player_points(
+        player_id="x",
+        player_name="X",
+        team="A",
+        role="BAT",
+        batting={
+            "expected_runs": 40,
+            "expected_balls": 28,
+            "runs_p10": 10,
+            "runs_p50": 35,
+            "runs_p90": 70,
+            "p_runs_ge30": 0.55,
+            "p_runs_ge50": 0.25,
+            "p_runs_ge100": 0.02,
+        },
+        bowling={
+            "expected_wickets": 1.2,
+            "expected_overs": 4.0,
+            "expected_economy": 7.0,
+            "wickets_p10": 0.0,
+            "wickets_p50": 1.0,
+            "wickets_p90": 3.0,
+            "p_wickets_ge3": 0.2,
+            "p_wickets_ge4": 0.05,
+            "p_wickets_ge5": 0.01,
+        },
+    )
+    assert row["fantasy_points_p10"] is not None
+    assert row["fantasy_points_p90"] is not None
+    assert row["fantasy_points_p10"] < row["fantasy_points"] < row["fantasy_points_p90"]
+
+
+def test_batting_order_opportunity_preserves_totals() -> None:
+    from cric_rep_learn.simulation.batting_opportunity import (
+        apply_batting_order_opportunity,
+    )
+
+    batters = [
+        {"player_id": f"b{i}", "expected_balls": 10.0, "expected_runs": 12.0,
+         "expected_fours": 1.0, "expected_sixes": 0.5}
+        for i in range(11)
+    ]
+    # Front-load shares like T20 openers.
+    shares = [0.18, 0.16, 0.14, 0.12, 0.10, 0.08, 0.07, 0.05, 0.04, 0.03, 0.03]
+    out = apply_batting_order_opportunity(batters, shares=shares, blend=0.5)
+    assert abs(sum(b["expected_balls"] for b in out) - 110.0) < 1e-6
+    assert abs(sum(b["expected_runs"] for b in out) - 132.0) < 1e-6
+    assert out[0]["expected_balls"] > out[-1]["expected_balls"]

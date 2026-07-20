@@ -214,6 +214,9 @@ def run_dream_xi(
                 "team": p["team"],
                 "role": p["role"],
                 "fantasy_points": p["fantasy_points"],
+                "fantasy_points_p10": p.get("fantasy_points_p10"),
+                "fantasy_points_p50": p.get("fantasy_points_p50"),
+                "fantasy_points_p90": p.get("fantasy_points_p90"),
                 "batting_points": p.get("batting_points"),
                 "bowling_points": p.get("bowling_points"),
             }

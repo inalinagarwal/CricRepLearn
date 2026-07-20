@@ -259,6 +259,45 @@ def bowling_points(bowler: dict[str, Any]) -> dict[str, float]:
     }
 
 
+def _fantasy_quantile(
+    batting: dict[str, Any],
+    bowling: dict[str, Any],
+    *,
+    runs_key: str,
+    wickets_key: str,
+) -> float | None:
+    """Approximate fantasy P10/P50/P90 from MC run/wicket quantiles."""
+    runs = batting.get(runs_key)
+    wickets = bowling.get(wickets_key)
+    if runs is None and wickets is None:
+        return None
+    bat_q = dict(batting)
+    bowl_q = dict(bowling)
+    if runs is not None:
+        bat_q["expected_runs"] = float(runs)
+        # Scale balls with runs so SR stays sane at the quantile.
+        base_runs = float(batting.get("expected_runs") or 0.0)
+        base_balls = float(batting.get("expected_balls") or 0.0)
+        if base_runs > 1e-9:
+            bat_q["expected_balls"] = base_balls * (float(runs) / base_runs)
+    if wickets is not None:
+        bowl_q["expected_wickets"] = float(wickets)
+    # Quantile paths should not double-count survival EV tiers.
+    for key in (
+        "p_runs_ge30",
+        "p_runs_ge50",
+        "p_runs_ge100",
+        "p_wickets_ge3",
+        "p_wickets_ge4",
+        "p_wickets_ge5",
+    ):
+        bat_q.pop(key, None)
+        bowl_q.pop(key, None)
+    return float(
+        batting_points(bat_q)["batting_points"] + bowling_points(bowl_q)["bowling_points"]
+    )
+
+
 def merge_player_points(
     *,
     player_id: str,
@@ -304,6 +343,12 @@ def merge_player_points(
             else batting.get("sixes")
             or 0.0
         ),
+        "runs_p10": batting.get("runs_p10"),
+        "runs_p50": batting.get("runs_p50"),
+        "runs_p90": batting.get("runs_p90"),
+        "balls_p10": batting.get("balls_p10"),
+        "balls_p50": batting.get("balls_p50"),
+        "balls_p90": batting.get("balls_p90"),
         "p_runs_ge30": batting.get("p_runs_ge30"),
         "p_runs_ge50": batting.get("p_runs_ge50"),
         "p_runs_ge100": batting.get("p_runs_ge100"),
@@ -322,12 +367,24 @@ def merge_player_points(
         "expected_economy": bowling.get("expected_economy")
         if bowling.get("expected_economy") is not None
         else bowling.get("economy"),
+        "wickets_p10": bowling.get("wickets_p10"),
+        "wickets_p50": bowling.get("wickets_p50"),
+        "wickets_p90": bowling.get("wickets_p90"),
         "p_wickets_ge3": bowling.get("p_wickets_ge3"),
         "p_wickets_ge4": bowling.get("p_wickets_ge4"),
         "p_wickets_ge5": bowling.get("p_wickets_ge5"),
         **bat,
         **bowl,
         "fantasy_points": float(total),
+        "fantasy_points_p10": _fantasy_quantile(
+            batting, bowling, runs_key="runs_p10", wickets_key="wickets_p10"
+        ),
+        "fantasy_points_p50": _fantasy_quantile(
+            batting, bowling, runs_key="runs_p50", wickets_key="wickets_p50"
+        ),
+        "fantasy_points_p90": _fantasy_quantile(
+            batting, bowling, runs_key="runs_p90", wickets_key="wickets_p90"
+        ),
     }
 
 
@@ -350,17 +407,29 @@ def average_player_pools(
             "expected_balls",
             "expected_fours",
             "expected_sixes",
+            "runs_p10",
+            "runs_p50",
+            "runs_p90",
+            "balls_p10",
+            "balls_p50",
+            "balls_p90",
             "p_runs_ge30",
             "p_runs_ge50",
             "p_runs_ge100",
             "expected_wickets",
             "expected_overs",
+            "wickets_p10",
+            "wickets_p50",
+            "wickets_p90",
             "p_wickets_ge3",
             "p_wickets_ge4",
             "p_wickets_ge5",
             "batting_points",
             "bowling_points",
             "fantasy_points",
+            "fantasy_points_p10",
+            "fantasy_points_p50",
+            "fantasy_points_p90",
             "runs_component",
             "boundary_component",
             "milestone_component",

@@ -11,6 +11,10 @@ from cric_rep_learn.simulation.attack import (
     ball_bowler_schedule,
     build_over_schedule,
 )
+from cric_rep_learn.simulation.batting_opportunity import (
+    apply_batting_order_opportunity,
+    load_batting_order_ball_shares,
+)
 from cric_rep_learn.simulation.chase import apply_chase_pressure
 from cric_rep_learn.simulation.partnership import partnership_tilt
 from cric_rep_learn.simulation.phase import t20_phase
@@ -360,6 +364,9 @@ def simulate_innings(
                 "runs_p50": float(np.quantile(br, 0.50)),
                 "runs_p90": float(np.quantile(br, 0.90)),
                 "expected_balls": float(bb.mean()),
+                "balls_p10": float(np.quantile(bb, 0.10)),
+                "balls_p50": float(np.quantile(bb, 0.50)),
+                "balls_p90": float(np.quantile(bb, 0.90)),
                 "expected_fours": float(bf.mean()),
                 "expected_sixes": float(bs.mean()),
                 "p_batted": float(np.mean(bb > 0)),
@@ -369,6 +376,13 @@ def simulate_innings(
                 "p_fours_ge4": float(np.mean(bf >= 4.0)),
                 "p_sixes_ge2": float(np.mean(bs >= 2.0)),
             }
+        )
+    # Soft tilt balls/runs toward train batting-order opportunity shares.
+    canonical_dir = getattr(rates, "canonical_dir", None)
+    if canonical_dir is not None:
+        shares = load_batting_order_ball_shares(canonical_dir)
+        batter_summary = apply_batting_order_opportunity(
+            batter_summary, shares=shares
         )
 
     bowler_summary = []

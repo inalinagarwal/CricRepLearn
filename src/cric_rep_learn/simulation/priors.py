@@ -13,6 +13,79 @@ from cric_rep_learn.data.bowling_style import parse_bowling_style
 from cric_rep_learn.players.player_effects import _posterior_rate, expected_runs_vs_bowler
 from cric_rep_learn.players.forecast_vs_attack import expected_dismissal_rate_vs_bowler
 
+_BOWLER_WICKET_PRIOR_CACHE: dict[str, dict[str, float]] = {}
+
+
+def load_bowler_wicket_priors(
+    canonical_dir: Path,
+    *,
+    strength: float = 120.0,
+    min_balls: int = 60,
+    clip: tuple[float, float] = (0.75, 1.35),
+) -> dict[str, float]:
+    """
+    Train-only shrunk bowler wicket/ball rate as a multiplier vs global.
+
+    Elite bowlers get >1, part-timers <1. Used to tilt dismissal hazards
+    without reopening delivery-residual training.
+    """
+    key = str(canonical_dir.resolve())
+    if key in _BOWLER_WICKET_PRIOR_CACHE:
+        return _BOWLER_WICKET_PRIOR_CACHE[key]
+
+    deliveries = _escape(canonical_dir / "deliveries.parquet")
+    split = _escape(canonical_dir / "split_manifest.parquet")
+    connection = duckdb.connect()
+    try:
+        global_row = connection.execute(
+            f"""
+            SELECT
+                SUM(d.bowler_wicket_count)::DOUBLE AS wickets,
+                SUM(CASE WHEN d.is_legal THEN 1 ELSE 0 END)::DOUBLE AS balls
+            FROM read_parquet('{deliveries}') d
+            JOIN read_parquet('{split}') s USING (match_id)
+            WHERE s.split = 'train'
+              AND NOT d.is_super_over
+            """
+        ).fetchone()
+        g_wk = float(global_row[0] or 0.0)
+        g_balls = float(global_row[1] or 1.0)
+        global_rate = g_wk / g_balls if g_balls > 0 else 0.05
+
+        frame = connection.execute(
+            f"""
+            SELECT
+                d.bowler_id,
+                SUM(d.bowler_wicket_count)::DOUBLE AS wickets,
+                SUM(CASE WHEN d.is_legal THEN 1 ELSE 0 END)::DOUBLE AS balls
+            FROM read_parquet('{deliveries}') d
+            JOIN read_parquet('{split}') s USING (match_id)
+            WHERE s.split = 'train'
+              AND NOT d.is_super_over
+            GROUP BY 1
+            """
+        ).fetchdf()
+    finally:
+        connection.close()
+
+    lo, hi = clip
+    priors: dict[str, float] = {}
+    for row in frame.to_dict(orient="records"):
+        balls = float(row["balls"])
+        if balls < min_balls:
+            priors[str(row["bowler_id"])] = 1.0
+            continue
+        rate = _posterior_rate(
+            float(row["wickets"]),
+            balls,
+            global_rate,
+            strength,
+        )
+        mult = rate / global_rate if global_rate > 0 else 1.0
+        priors[str(row["bowler_id"])] = float(min(max(mult, lo), hi))
+    _BOWLER_WICKET_PRIOR_CACHE[key] = priors
+    return priors
+
 
 def _escape(path: Path) -> str:
     return str(path.resolve()).replace("'", "''")
@@ -82,6 +155,7 @@ class InningsRateModel:
         self._batter_phase_cache: dict[tuple[str, str], dict[str, float]] = {}
         self._context_cache: dict[tuple[str, str], dict[str, float]] = {}
         self._hand_mult = self._build_handedness_multipliers()
+        self.bowler_wicket_mult = load_bowler_wicket_priors(self.canonical_dir)
         self.venue = venue
         self.venue_resolution = None
         self.venue_clause = "TRUE"
@@ -467,6 +541,11 @@ class InningsRateModel:
             if wx_notes:
                 level = "weather[" + ",".join(wx_notes) + "]→" + level
                 self.weather_notes = wx_notes
+
+        bowler_mult = float(self.bowler_wicket_mult.get(bowler_id, 1.0))
+        if abs(bowler_mult - 1.0) > 1e-6:
+            p_out *= bowler_mult
+            level = f"bowler_wicket×{bowler_mult:.2f}→{level}"
 
         p_out = float(min(max(p_out, 1e-4), 0.35))
         sr = float(max(sr, 0.05))

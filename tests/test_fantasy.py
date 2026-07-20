@@ -599,3 +599,61 @@ def test_holdout_mc_chase_contributes_both_innings(tmp_path: Path) -> None:
     assert float(row["balls"]) >= 180.0
     by_team = pred.groupby("team")["expected_runs"].sum()
     assert (by_team > 40.0).all()
+
+
+def test_baseline_strategies_smoke() -> None:
+    from cric_rep_learn.fantasy.baselines import (
+        pick_dream_xi,
+        pick_greedy_points_xi,
+        pick_naive_top11,
+        pick_random_legal_xi,
+        score_xi_actual,
+    )
+    from cric_rep_learn.fantasy.scoring import merge_player_points
+
+    pool = []
+    roles = ("WK", "BAT", "BAT", "BAT", "AR", "AR", "BOWL", "BOWL", "BOWL", "BAT", "BAT", "BOWL")
+    for i, role in enumerate(roles):
+        pool.append(
+            merge_player_points(
+                player_id=f"p{i}",
+                player_name=f"P{i}",
+                team="A" if i < 6 else "B",
+                role=role,
+                batting={"expected_runs": 30 - i, "expected_balls": 20},
+                bowling={
+                    "expected_wickets": max(0.0, 2.5 - i * 0.2),
+                    "expected_overs": 3.0,
+                    "expected_economy": 7.0,
+                },
+                credits=8.5,
+            )
+        )
+    actual = {p["player_id"]: float(20 + i) for i, p in enumerate(pool)}
+    random_pick = pick_random_legal_xi(pool, seed=3)
+    naive = pick_naive_top11(pool)
+    greedy = pick_greedy_points_xi(pool)
+    dream = pick_dream_xi(pool)
+    assert random_pick["legal"]
+    assert len(naive["players"]) == 11
+    assert greedy["legal"] and dream["legal"]
+    pts = score_xi_actual(
+        dream["players"],
+        actual_points=actual,
+        captain_id=dream["captain_id"],
+        vice_id=dream["vice_id"],
+    )
+    assert pts > 0
+
+
+def test_bowler_wicket_prior_multiplier() -> None:
+    from cric_rep_learn.simulation.priors import load_bowler_wicket_priors
+
+    canonical = Path("artifacts/canonical")
+    if not (canonical / "deliveries.parquet").exists():
+        pytest.skip("canonical data not built")
+    priors = load_bowler_wicket_priors(canonical)
+    assert priors
+    vals = list(priors.values())
+    assert all(0.75 <= v <= 1.35 for v in vals)
+    assert max(vals) > 1.0 and min(vals) < 1.0
